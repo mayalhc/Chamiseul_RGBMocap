@@ -8,6 +8,7 @@ ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) el
 HOME = Path(os.environ.get("RGB_MOCAP_DATA", ROOT)).resolve()
 MODELS = HOME / "models"
 PROJECTS = HOME / "projects"
+DOWNLOADS = HOME / "downloads"
 UPSTREAM = ROOT / "third_party"
 COMPAT = ROOT / "native_compat"
 

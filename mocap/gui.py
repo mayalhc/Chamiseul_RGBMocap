@@ -6,13 +6,19 @@ from .validation_snapshot import read_only_checks
 import json
 import codecs
 import math
+
+import numpy as np
 import os
+import subprocess
+import sys
+import threading
+import uuid
 from collections import deque
 from pathlib import Path
 import time
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QProcess, QProcessEnvironment, QTimer, Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut, QTextOption
+from PySide6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QShortcut, QTextOption
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
     QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QTextEdit, QVBoxLayout, QWidget)
@@ -22,9 +28,24 @@ from .paths import ROOT, PROJECTS, worker_command
 from .video import select_preview
 from .viewer import VideoView, MotionView
 from .playback import playback_frame, PlaybackTimerResolution
+from .source_audio import SourceAudio
 from .timeline import TimelineSlider
 from .preview_data import PreviewDataLoader, project_signature
-from .motion_tools import MOTION_TOOLS, selected_export, RESULTS, result_kind, result_options, result_is_current, base_result, body_result, has_handflow
+from .motion_tools import MOTION_TOOLS, RECONSTRUCTION_STAGES, selected_export, RESULTS, result_kind, result_options, result_is_current, base_result, body_result, has_handflow
+
+def live_marker(root):
+    """The file through which a preloaded worker learns its live channel."""
+    return Path(root) / 'cache' / 'live-warm-channel.txt'
+
+
+def link_clock(seconds, length=0.0):
+    """A playhead for the link strip: m:ss, with the clip length when known."""
+    def stamp(value):
+        value = max(0, int(value))
+        return '%d:%02d' % divmod(value, 60) if value < 3600 else '%d:%02d:%02d' % (
+            value // 3600, value % 3600 // 60, value % 60)
+    return stamp(seconds) + (' / ' + stamp(length) if length else '')
+
 
 STAGES = {"prepare": "Prepare Video", "track": "Track Actor", "pva": "Analyze 2D", "gvhmr": "Initial 3D Reconstruction", "refine": "Refine Motion", "export": "Export", "download": "Model Manager", "diagnose": "Check System"}
 
@@ -42,6 +63,8 @@ from .workspace_ui import build_workspace
 from .people_ui import PeopleWorkspace
 from .project_save_ui import ProjectSaving
 from .project_workspace_ui import ModelWorkspace
+from .mamma_ui import MammaWorkspace
+from .prompthmr_ui import PromptHMRWorkspace
 STAGES.update(mamma_prepare='Prepare Multi-view Videos',mamma_masks='MAMMA Person Masks',mamma_landmarks='MAMMA Surface Landmarks',mamma_camera='MAMMA Cameras',mamma_fit='MAMMA 3D Fit',mamma_publish='MAMMA Motion Correction and Preview')
 STAGES.update(prompthmr_prepare='Prepare PromptHMR Video',prompthmr_track='PromptHMR People and Masks',prompthmr_pose='PromptHMR Camera, Keypoints and Motion',prompthmr_world='PromptHMR Shared World and Post-optimization',prompthmr_publish='PromptHMR Motion Correction and Preview')
 STAGES['save_project']='Save Project As'
@@ -81,9 +104,9 @@ class ModelDownloadDialog(QDialog):
         self.import_status.hide()
         layout.addWidget(self.import_status)
         actions = QHBoxLayout(); actions.addStretch()
-        self.website = QPushButton("Open Download Page")
-        self.website.setToolTip('Open the model provider website in your browser.')
-        self.website.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(manual_download_page(key))))
+        self.website = QPushButton("Open Download Page && Auto-Import")
+        self.website.setToolTip(tooltip_text('Open the provider website in your browser. Sign in and download there; the app notices the finished file in your Downloads folder, checks it, stores it in the models folder and removes the original. No need to move anything.'))
+        self.website.clicked.connect(self.open_and_watch)
         actions.addWidget(self.website)
         self.import_file = QPushButton("Import...")
         self.import_file.setToolTip('Select the downloaded model file to check and import it. These instructions stay open.')
@@ -103,8 +126,24 @@ class ModelDownloadDialog(QDialog):
         self.status_timer.start()
 
     def hideEvent(self, event):
+        if getattr(self, 'watcher', None) is not None:
+            self.watcher.stop()
         self.status_timer.stop()
         super().hideEvent(event)
+
+    def open_and_watch(self):
+        from .models import manual_download_page
+        QDesktopServices.openUrl(QUrl(manual_download_page(self.model_key)))
+        if self.manager is None:
+            return
+        if getattr(self, 'watcher', None) is None:
+            from .model_signin import DownloadWatcher
+            self.watcher = DownloadWatcher(self.manager, self, self.show_watch)
+        self.watcher.start()
+
+    def show_watch(self, text):
+        self.import_status.setText(text)
+        self.import_status.show()
 
     def import_download(self):
         if self.manager is not None:
@@ -150,6 +189,21 @@ class ModelsDialog(QDialog):
         description = QLabel(f"Models for {self.tool.label} and compatible add-ons.\nUse Auto Download for public files, or Manual Download and Import for any model.\nRegistered body model files are not redistributed by this app.")
         description.setWordWrap(True)
         layout.addWidget(description)
+        # Every model file lives under this one folder. Import writes each checked
+        # file to the path shown in its row, so users can also place a downloaded
+        # file there themselves before importing it.
+        from .paths import MODELS
+        folder = QHBoxLayout()
+        self.models_path = QLabel('Model folder: ' + str(MODELS))
+        self.models_path.setWordWrap(True)
+        self.models_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.models_path.setToolTip(tooltip_text('The app reads models only from this folder. Each row shows the exact file path it uses; hover a row, or open Manual Download, to see it.'))
+        folder.addWidget(self.models_path, 1)
+        self.open_models_folder_button = QPushButton('Open Folder')
+        self.open_models_folder_button.setToolTip(tooltip_text('Open this folder in Windows Explorer so you can copy a downloaded file into place.'))
+        self.open_models_folder_button.clicked.connect(self.open_models_folder)
+        folder.addWidget(self.open_models_folder_button)
+        layout.addLayout(folder)
         if self.tool.key=='mamma':
             from .mamma_manager import runtime_panel
             layout.addWidget(runtime_panel(self))
@@ -204,6 +258,11 @@ class ModelsDialog(QDialog):
         self.status_timer.timeout.connect(self.sync_task_status)
         self.refresh()
 
+    def open_models_folder(self):
+        from .paths import MODELS
+        MODELS.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(MODELS)))
+
     def refresh(self):
         from .models import STAGE_REQUIREMENTS
         for i, model in enumerate(self.models):
@@ -218,6 +277,9 @@ class ModelsDialog(QDialog):
                 if column==0:item.setToolTip(str(model.path))
                 item.setForeground(QColor("#d5d5d5" if available else "#ffb45c"))
                 font = item.font(); font.setBold(not available); item.setFont(font)
+                item.setToolTip(tooltip_text(("Registered. " if available else
+                    "Missing. Download it from the provider and use Import in this row; the app checks it, then registers it at:\n") +
+                    str(model.path)))
             cell = self.table.cellWidget(i, 2)
             if cell is None or cell.property("model_key") != model.key:
                 cell = QWidget(); cell.setProperty("model_key", model.key)
@@ -227,6 +289,12 @@ class ModelsDialog(QDialog):
                     cell.automatic = QPushButton("Auto Download")
                     cell.automatic.setToolTip(tooltip_text("Download this file automatically. If it fails, use Manual Download or Import an existing copy."))
                     cell.automatic.clicked.connect(lambda checked=False, key=model.key: self.start_download(key))
+                    row.addWidget(cell.automatic)
+                from .models import PROVIDER_FILES
+                if cell.automatic is None and model.key in PROVIDER_FILES:
+                    cell.automatic = QPushButton("Auto Download")
+                    cell.automatic.setToolTip(tooltip_text("Sign in with your own free account and the file is downloaded and installed here automatically. Your password is used only for this download and is not stored."))
+                    cell.automatic.clicked.connect(lambda checked=False, key=model.key: self.start_provider_download(key))
                     row.addWidget(cell.automatic)
                 cell.manual = QPushButton("Manual Download...")
                 cell.manual.setToolTip(tooltip_text("Show download links and instructions. Download in your browser, then use Import in the instructions or this row."))
@@ -326,6 +394,13 @@ class ModelsDialog(QDialog):
             raise ValueError("This model is not part of the selected motion tool.")
         self.start_model_jobs([("download", ["--model", key])])
 
+    def start_provider_download(self, key):
+        """Sign in with the person's own account and install a registration-gated file."""
+        if self.window.busy or key not in {model.key for model in self.models}:
+            return
+        from .model_signin import download_with_sign_in
+        self._provider_download = download_with_sign_in(self, key, self, self.task_status.setPlainText)
+
     def manual_setup(self, key):
         if key not in {model.key for model in self.models}:
             raise ValueError("This model is not part of the selected motion tool.")
@@ -358,6 +433,7 @@ from .preview_export_ui import PreviewExportWorkspace
 class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWorkspace,CharacterWorkspace,ModelWorkspace,ProjectSaving,PeopleWorkspace,QMainWindow):
     def __init__(self, video: Path | None = None):
         super().__init__()
+        self.init_mamma()
         self.setWindowTitle("RGB MoCap | Motion Workspace")
         self.resize(1440, 880)
         self.setMinimumSize(1100, 700)
@@ -381,6 +457,14 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.cancel_process = None
         self.buffer = ""
         self.failed = False
+        self.camera_session = None
+        self.live_warmup = False
+        self._live_person_row = False
+        self.live_window_seconds = 10.0
+        self.preview_volume = 1.0
+        self._volume_before_mute = 100
+        self.preload_worker = None
+        self.preload_log = None
         self.cancelled = False
         self.hardware_summary = None
         self.current_stage = None
@@ -394,6 +478,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.play_anchor = 0
         self.playback_tick = False
         self.presented_times = deque()
+        self.source_audio = SourceAudio(self)
         self.preview_data = None
         self.preview_signature = None
         from .contact_writer import ContactWriter
@@ -427,6 +512,9 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.setAcceptDrops(True)
         self.data_loader.start()
         self.contact_writer.start()
+        # Load the live models in the background from the start: the first live
+        # session then moves the character instead of waiting for them.
+        QTimer.singleShot(2500, self.preload_live_solver)
         self.processing_guard = None
         self.guard_timer = QTimer(self)
         self.guard_timer.setInterval(500)
@@ -486,8 +574,12 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.motion_correction.setEnabled(not self.busy)
         self.correction_controls.setEnabled(not self.busy and self.motion_correction.isChecked())
         flat=self.correction_mode.currentData()=='flat'
+        self.floor_board.setEnabled(not self.busy and flat)
+        for widget in (self.floor_board_paper, self.floor_board_page):
+            widget.setEnabled(not self.busy and flat)
         self.auto_floor.setEnabled(not self.busy and flat)
-        self.floor_height.setEnabled(not self.busy and flat and not self.auto_floor.isChecked())
+        # Typing a height switches the automatic estimate off, so the field never needs unlocking first.
+        self.floor_height.setEnabled(not self.busy and flat)
         self.correction_button.setEnabled(not self.busy and not self.contact_saving and self.project is not None and
             (self.project/RESULTS[base_result(self.active_result)][0]).exists())
         self.slider.trim_enabled = not self.busy and self.info is not None
@@ -500,6 +592,12 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.export_action.setText('Export Character...' if character else 'Export...')
         self.export_action.setEnabled(not self.busy and (bool(character.get('takes')) and not character.get('needs_retarget') if character else self.project is not None and self.current_export() is not None))
         self.export_action.setToolTip(tooltip_text("Choose a character export format and whether to include its mesh. PMX characters also support VMD motion." if character else "Export the displayed motion as FBX, BVH or a portable Blender project. Multiple people export separately; MAMMA also offers a whole-scene Blender bundle."))
+        # FBX and GLB have their own File menu entries and stay visible whether
+        # or not a character row is selected.
+        exportable_character = not self.busy and not self.contact_saving and (
+            bool(character.get('takes')) if character else any(c.get('takes') for c in getattr(self,'characters',[])))
+        self.export_character_action.setEnabled(exportable_character)
+        self.export_character_glb_action.setEnabled(exportable_character)
         self.play_button.setEnabled(self.info is not None and self.video_readable)
         for action in self.open_actions:
             action.setEnabled(not self.busy)
@@ -529,6 +627,62 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
                      not result_is_current(self.project,'corrected_'+base_result(self.active_result)))
         self.motion_view.set_correction_floor(self.floor_height.value() if self.project is not None else None,
             automatic=self.auto_floor.isChecked(),pending=pending,enabled=enabled)
+        self.refresh_camera_hint()
+
+    def refresh_camera_hint(self):
+        """Recommend a camera mode when the clip itself moves."""
+        from .camera_motion import cached
+        if self.project is None:
+            self.camera_hint.hide()
+            return
+        value = cached(self.project)
+        if value is None:
+            attempted = getattr(self, 'camera_hint_attempted', None)
+            if attempted is None:
+                attempted = self.camera_hint_attempted = set()
+            key = str(Path(self.project).resolve())
+            if key not in attempted:
+                from .camera_check_ui import CameraCheck
+                if getattr(self, 'camera_check', None) is None:
+                    self.camera_check = CameraCheck(self)
+                    self.camera_check.ready.connect(self.camera_hint_ready)
+                attempted.add(key)
+                self.camera_check.check(self.project)
+        self.apply_camera_hint(value)
+
+    def camera_hint_ready(self, path, value):
+        if self.project is None or Path(path).resolve() != Path(self.project).resolve():
+            return
+        self.apply_camera_hint(value)
+
+    def apply_camera_hint(self, value):
+        from .camera_motion import advice
+        tool = self.model_choice.currentData()
+        if tool == 'exmr':
+            static = self.exmr_camera.currentData() is True
+        elif tool == 'flowhmr':
+            static = self.flow_sampling.currentData() == -1
+        else:
+            static = True
+        text = advice(value, tool, static) or ''
+        if text != self.camera_hint.text():self.camera_hint.setText(text)
+        self.camera_hint.setVisible(bool(text))
+
+    def save_floor_board_page(self):
+        from .floor_board import save_page
+        paper=self.floor_board_paper.currentData()
+        name, _ = QFileDialog.getSaveFileName(self, "Save Floor Reference Board",
+                                              str(Path.home() / f'rgbmocap-floor-board-{paper}.png'), "PNG (*.png)")
+        if not name:
+            return
+        try:
+            path = save_page(name, paper=paper)
+        except OSError as error:
+            QMessageBox.warning(self, "Floor Reference Board", str(error))
+            return
+        self.log.appendPlainText(f"Saved the {paper.upper()} floor reference board: " + str(path))
+        self.log.appendPlainText("Print it at 100% (actual size), lay it flat on the floor and show it once in the video.")
+        self.log.appendPlainText("The app reads the sheet size from the printed sheet, so any supported size can be used later.")
 
     def show_model_guide(self):
         from .model_guide import ModelGuideDialog
@@ -598,17 +752,58 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
     def refinement_changed(self, enabled):
         self.set_active_result(self.selected_result())
 
-    def current_export(self):
+    def unavailable_result_note(self, kind):
+        """Explain which selected variant has no committed preview yet."""
+        result = {"initial":MOTION_TOOLS[self.model_choice.currentData()].label, "refined":"HTD",
+                  "footmr_initial":"FootMR", "footmr_refined":"HTD + FootMR"}[body_result(kind)]
+        if has_handflow(kind):result += " + HandFlow"
+        if has_handflow(kind) and not result_is_current(self.project,base_result(kind)):
+            return 'No current HandFlow preview. Run Reconstruct 3D to infer finger motion.'
+        if kind.startswith('corrected_'):
+            return 'Correction settings changed or result unavailable.\nUse Apply Correction to update the preview.'
+        return f"No {result} preview yet. Run Reconstruct 3D to create it."
+
+    def preview_display_fallbacks(self, kind):
+        """Closest displayable variants of a result that was never computed."""
+        from .motion_tools import RESULTS, base_result, body_result
+        candidates=[]
+        for candidate in (kind.replace('handflow_','',1), base_result(kind),
+                          body_result(kind), body_result(base_result(kind)), 'initial'):
+            if candidate in RESULTS and candidate!=kind and candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
+
+    def displayable_result(self, project=None, kind=None, ignore_contacts=False):
+        """Closest committed variant of the selected result, for display only.
+
+        The selection itself never changes: a variant such as HandFlow that has
+        no committed preview yet resolves to the same stack without it, so one
+        unchecked option cannot blank the viewport or drop actors from a scene.
+        """
+        from .result_artifacts import artifacts_current
+        project = self.project if project is None else project
+        kind = self.active_result if kind is None else kind
+        if project is None:
+            return kind
+        for candidate in (kind, *self.preview_display_fallbacks(kind)):
+            if artifacts_current(project, candidate) and result_is_current(project, candidate, ignore_contacts):
+                return candidate
+        return kind
+
+    def current_export(self, kind=None, project=None):
         if self._pear_active:return None
-        info=self.contact_tracks.get(base_result(self.active_result))
-        if self.active_result.startswith('corrected_') and (self.contact_saving or (info and info.get('unsaved'))):return None
-        # selected_export checks source, correction and target receipts itself.
-        if self.project is not None:
-            return selected_export(self.project, self.active_result)
+        kind=self.active_result if kind is None else kind
+        project=self.project if project is None else project
+        info=self.contact_tracks.get(base_result(kind))
+        if kind.startswith('corrected_') and (self.contact_saving or (info and info.get('unsaved'))):return None
+        if project is not None and result_is_current(project, kind):
+            return selected_export(project, kind)
         return None
 
     def render_changed(self):
         self.motion_view.show_bones=self.bone_overlay.isChecked()
+        self.motion_view.show_character_bones=self.character_bones.isChecked()
+        self.follow_source=self.follow_source_box.isChecked()
         self.motion_view.update()
         if hasattr(self,'camera_tools'):self.camera_tools.canvas.update()
 
@@ -634,9 +829,10 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         jobs=[]
         for project in dict.fromkeys(projects):
             from .flow_placement import needs_update
+            result=self.displayable_result(project)
             placement_old=self.model_choice.currentData()=='flowhmr' and needs_update(project)
-            if (project/RESULTS[base_result(self.active_result)][0]).is_file() and (placement_old or result_is_current(project,self.active_result) and not current(project,self.active_result)):
-                jobs.append(('rig',['--project',str(project),'--result',self.active_result]))
+            if (project/RESULTS[base_result(result)][0]).is_file() and (placement_old or result_is_current(project,result) and not current(project,result)):
+                jobs.append(('rig',['--project',str(project),'--result',result]))
         if jobs:self.start_jobs(jobs)
 
     def open_model_manager(self):
@@ -679,11 +875,1068 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         if name:
             self.load_video(Path(name))
 
+    def new_session(self):
+        """Start an empty workspace: a new project without restarting the app.
+
+        The open video or link, its decoder, the live solver and every
+        per-project pane are released, so the next Open starts from the same
+        state as a freshly launched window. Saved project folders are not
+        touched: nothing on disk is deleted.
+        """
+        if self.busy:
+            self.status.setText('Cancel the running job before starting a new project.')
+            return
+        if getattr(self, 'camera_session', None) is not None:
+            self.stop_live_camera()
+        if getattr(self, 'workspace_root', None) is not None:
+            self.remember_workspace_model()
+        self.workspace_root = None
+        self._workspace_video_reference = False
+        self._workspace_camera = None
+        self.stop_playback()
+        self.clear_preview()
+        self.reset_people()
+        self.motion_view.set_motion(None, None, None)
+        self.motion_view.auto_fit = True
+        # The decoder, its cache and its frames belong to the project left behind.
+        self.video_view.shutdown()
+        self.video_path = self.project = self.info = None
+        self.source_url = ''
+        self.source_download.setEnabled(False)
+        self.source_offset = self.source_end = 0.0
+        self.video_readable = False
+        self.slider.setRange(0, 0)
+        self.slider.reset_trim()
+        self.clip_changed(0, 0)
+        self.active_result = self.selected_result()
+        self.restore_correction_options({})
+        self.filename.setText('No clip loaded')
+        self.fps_label.setText('No clip loaded')
+        self.time_label.setText('0.00 / 0.00 s')
+        self.setWindowTitle('RGB MoCap | Motion Workspace')
+        self.update_readiness()
+        self.status.setText('New project. Open a video or a video link to begin.')
+
+    def record_webcam(self):
+        """Record a short clip from a webcam and open it like any video."""
+        if self.busy:
+            return
+        from .webcam_dialog import WebcamDialog
+        dialog = WebcamDialog(self, on_window=self.load_video)
+        try:
+            accepted = dialog.exec() == QDialog.Accepted
+            if dialog.live_session is not None:
+                # The window length is chosen in the dialog; Record window
+                # keeps using it once the workspace owns the live camera.
+                self.live_window_seconds = float(dialog.seconds.value())
+                self.start_live_camera(dialog.live_session)
+                return
+            if accepted and dialog.recorded:
+                self.load_video(Path(dialog.recorded))
+        finally:
+            dialog.deleteLater()
+
+    def start_live_camera(self, session, record=True):
+        """Show the handed-over live source: preview only.
+
+        Nothing is written to disk here. This is the rehearsal view - Find
+        person starts the character so its motion can be checked against the
+        performer, and only Record window captures a take. A web link
+        (``record=False``) is a stream with no local capture to cut a window
+        from, so its Record window stays hidden.
+        """
+        self.camera_session = session
+        self.video_view.open_camera(session)
+        label = getattr(session, 'label', 'Live camera')
+        self._live_source_ended = False
+        self._live_person_row = False
+        self.live_record_button.setVisible(bool(record))
+        self.live_stop_button.setVisible(True)
+        self.start_live_box()
+        # Load the solver while the source is already playing: Find person then
+        # moves the character at once instead of waiting for a model load.
+        self.warm_live_solver()
+        self.fps_label.setText(f"{label} · {session.width}×{session.height}")
+        self.filename.setText(
+            f"{label} · {session.width}×{session.height} "
+            + ("· Find person checks the character, ● Record window keeps the take" if record
+               else "· Find person moves the character with the video · nothing is saved"))
+        # Find person works on the live feed. The character is only called
+        # in BY Find person - the order is: live, find, then the character.
+        self.update_people_readiness()
+        self.show_link_playback(session)
+
+    def show_link_playback(self, session):
+        """Show the link's playhead and Loop, or hide them for a camera.
+
+        Only a web link carries these controls: it is the one live source that
+        can be restarted at a chosen second, and the one that can run out.
+        """
+        controls = getattr(self, 'link_playback', None)
+        timer, self.link_playback_timer = getattr(self, 'link_playback_timer', None), None
+        if timer is not None:
+            timer.stop()
+        if controls is None:
+            return
+        seekable = session is not None and hasattr(session, 'seek') and hasattr(session, 'report')
+        controls.setVisible(bool(seekable))
+        if not seekable:
+            return
+        self._link_dragging = False
+        self.link_loop.blockSignals(True)
+        self.link_loop.setChecked(bool(getattr(session, 'loop', True)))
+        self.link_loop.blockSignals(False)
+        length = float(getattr(session, 'duration', 0.0) or 0.0)
+        self.link_position.setEnabled(bool(length))
+        self.link_position.blockSignals(True)
+        self.link_position.setValue(0)
+        self.link_position.blockSignals(False)
+        timer = QTimer(self)
+        timer.setInterval(200)
+        timer.timeout.connect(self.update_link_playback)
+        timer.start()
+        self.link_playback_timer = timer
+        self.update_link_playback()
+
+    def update_link_playback(self):
+        """Follow the link's playhead; the character's own state is untouched."""
+        session = getattr(self, 'camera_session', None)
+        if session is None or not hasattr(session, 'report'):
+            timer, self.link_playback_timer = getattr(self, 'link_playback_timer', None), None
+            if timer is not None:
+                timer.stop()
+            return
+        report = session.report()
+        length = float(report.get('duration') or 0.0)
+        position = float(report.get('position') or 0.0)
+        if not getattr(self, '_link_dragging', False):
+            self.link_position.blockSignals(True)
+            self.link_position.setValue(int(round(1000 * position / length)) if length else 0)
+            self.link_position.blockSignals(False)
+            self.link_time.setText(link_clock(position, length))
+
+    def link_position_pressed(self):
+        # Hold the playhead still while the handle is being dragged, so the
+        # stream's own progress does not fight the thumb.
+        self._link_dragging = True
+
+    def link_position_moved(self, value):
+        session = getattr(self, 'camera_session', None)
+        length = float(getattr(session, 'duration', 0.0) or 0.0)
+        if length:
+            self.link_time.setText(link_clock(length * value / 1000.0, length))
+
+    def link_position_released(self):
+        self._link_dragging = False
+        session = getattr(self, 'camera_session', None)
+        length = float(getattr(session, 'duration', 0.0) or 0.0)
+        value = self.link_position.value()
+        if session is None or not length or not hasattr(session, 'seek'):
+            return
+        seconds = length * value / 1000.0
+        if session.seek(seconds):
+            # Say where the playhead is going now; the reopened stream confirms
+            # it within a frame or two.
+            self.link_time.setText(link_clock(seconds, length))
+            self.status.setText('Link preview moving to ' + link_clock(seconds, length)
+                                + ' (the stream reopens there).')
+
+    def set_link_loop(self, enabled):
+        session = getattr(self, 'camera_session', None)
+        if session is None or not hasattr(session, 'set_loop'):
+            return
+        session.set_loop(enabled)
+        self.status.setText('Link preview will play again at its end.' if enabled
+                            else 'Link preview will stop on its last frame.')
+
+    def live_from_url(self, url=''):
+        """Drive the live character from a web video, without downloading it.
+
+        Only the live preview works this way: it needs each frame once, in
+        order, which a stream provides. Reconstruct 3D re-reads the whole clip
+        several times and still needs the file, so it keeps downloading once.
+        """
+        if self.busy:
+            return
+        if getattr(self, 'camera_session', None) is not None:
+            self.status.setText('A live source is already running. Press Stop first.')
+            return
+        if not url:
+            # One link window for both entries: it previews, never downloads.
+            self.choose_video_url()
+            return
+        if not url:
+            return
+        # Remembered so Download beside the video title can keep this clip for
+        # the stages that re-read it; the preview itself saves nothing.
+        self.source_url = url
+        self.source_download.setEnabled(True)
+        self.source_download.setToolTip(
+            'Save this link into the downloads folder and open it as a video. '
+            'Reconstruct 3D re-reads the clip, so it needs the file; the live '
+            'preview does not.')
+        self.status.setText('Connecting to the video link...')
+        QApplication.processEvents()
+        from .live_url import UrlSession
+        try:
+            session = UrlSession(url)
+            session.start_preview()
+        except Exception as error:          # noqa: BLE001 - reported, not raised
+            self.status.setText('The link could not be opened: ' + str(error)[:200])
+            return
+        # The first frame proves the stream really plays before the view and
+        # the workers are pointed at it.
+        deadline = time.monotonic() + 20.0
+        while session.frames == 0 and session.running and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.05)
+        if session.frames == 0:
+            detail = session.error or 'no frames arrived'
+            session.stop()
+            self.status.setText('The link did not play: ' + detail[:200])
+            return
+        self.start_live_camera(session, record=False)
+        self.start_link_audio(session)
+        self.status.setText('Live link ready. Press Find person to move the character with the video.')
+
+    def start_live_box(self):
+        """Track the performer in the live view with a box.
+
+        A separate worker on YOLO only: the box has to appear within a second
+        of going live, and the body solver takes minutes to load. Once the
+        solver publishes its own boxes this worker is retired - one detector
+        tracking the performer is enough.
+        """
+        if getattr(self, 'live_box_channel', None) is not None:
+            return
+        session = getattr(self, 'camera_session', None)
+        if session is None:
+            return
+        from .live_channel import LiveChannel
+        try:
+            channel = LiveChannel('rgbmocap-box-%s' % uuid.uuid4().hex[:12],
+                                  session.preview_width, session.preview_height, create=True)
+        except OSError as error:
+            self.fps_label.setText('Live tracking box unavailable: ' + str(error)[:120])
+            return
+        self.live_box_channel = channel
+        python = ROOT / 'runtime_exmr' / 'python.exe'
+        if not python.is_file():
+            python = Path(sys.executable)
+        log = (ROOT / 'cache' / 'live-box-worker.log').open('wb')
+        self.live_box_log = log
+        from .camera_capture import CREATE_NO_WINDOW, assign_to_job
+        self.live_box_worker = subprocess.Popen(
+            [str(python), '-B', '-m', 'mocap.live_worker', '--channel', channel.name,
+             '--detect-only'],
+            cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT, creationflags=CREATE_NO_WINDOW)
+        assign_to_job(self.live_box_worker)
+        self.start_live_feed()
+        self.live_box_timer = QTimer(self)
+        self.live_box_timer.setInterval(100)
+        self.live_box_timer.timeout.connect(self.poll_live_box)
+        self.live_box_timer.start()
+
+    def start_live_feed(self):
+        """Publish the camera frames to the live workers.
+
+        One timer for every live worker: the box detector, the body solver, or
+        both while the solver is still loading.
+        """
+        if getattr(self, 'live_feed_timer', None) is not None:
+            return
+        self.live_feed_timer = QTimer(self)
+        self.live_feed_timer.setInterval(33)
+        self.live_feed_timer.timeout.connect(self.feed_live_frames)
+        self.live_feed_timer.start()
+
+    def stop_live_feed(self):
+        timer, self.live_feed_timer = getattr(self, 'live_feed_timer', None), None
+        if timer is not None:
+            timer.stop()
+
+    def close_live_box_worker(self):
+        """Stop the box-only detector but keep painting boxes."""
+        from .live_channel import STOP
+        worker, self.live_box_worker = getattr(self, 'live_box_worker', None), None
+        channel, self.live_box_channel = getattr(self, 'live_box_channel', None), None
+        if channel is not None:
+            channel.set_state(STOP)
+        if worker is not None:
+            try:
+                worker.wait(10.0)
+            except OSError:
+                pass
+            if worker.poll() is None:
+                worker.kill()
+            try:
+                worker.wait(5.0)
+            except OSError:
+                pass
+        log, self.live_box_log = getattr(self, 'live_box_log', None), None
+        if log is not None:
+            log.close()
+        if channel is not None:
+            channel.close()
+
+    def stop_live_box(self):
+        """Stop live tracking: the box, its worker and its timer."""
+        timer, self.live_box_timer = getattr(self, 'live_box_timer', None), None
+        if timer is not None:
+            timer.stop()
+        self.close_live_box_worker()
+        self.video_view.set_live_box(None)
+
+    def poll_live_box(self):
+        """Paint the performer's box: the body solver's once it tracks, the
+        detector's before that."""
+        box = None
+        solver = getattr(self, 'live_channel', None)
+        if solver is not None:
+            box = solver.box()
+            if box is not None:
+                self.close_live_box_worker()
+        if box is None:
+            boxes = getattr(self, 'live_box_channel', None)
+            box = boxes.box() if boxes is not None else None
+        self.video_view.set_live_box(None if box is None else self.live_box_pixels(box))
+
+    def live_box_pixels(self, box):
+        """A worker box (preview pixels) in the capture pixels the view draws in.
+
+        The workers see the small preview frame the channel carries, while the
+        video view scales overlay boxes against the full capture size - so a
+        box passed through unscaled lands at half size in the top-left quarter.
+        """
+        session = getattr(self, 'camera_session', None)
+        if session is None or not session.preview_width:
+            return box[:4]
+        scale = session.width / float(session.preview_width)
+        return [float(value) * scale for value in box[:4]]
+
+    def live_person_icon(self, box=None):
+        """A small picture of the performer for the live People row."""
+        session = getattr(self, 'camera_session', None)
+        frame = session.snapshot() if session is not None else None
+        if frame is None:
+            return None
+        import cv2
+        crop = frame
+        if box is not None:
+            height, width = frame.shape[:2]
+            x0, y0, x1, y1 = [int(round(float(value))) for value in box[:4]]
+            x0, x1 = max(0, min(x0, width - 1)), max(1, min(x1, width))
+            y0, y1 = max(0, min(y0, height - 1)), max(1, min(y1, height))
+            if x1 > x0 and y1 > y0:
+                crop = frame[y0:y1, x0:x1]
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        image = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0],
+                       QImage.Format_RGB888).copy()
+        return image.scaled(48, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def live_character_files(self):
+        """The open take's own prepared character: its rig asset and skin.
+
+        A prepared result writes both beside the motion data, and the live
+        preview reuses them so it presents that person's character - the same
+        body the 3D view shows for the result - instead of a neutral stand-in.
+        """
+        project = getattr(self, 'project', None)
+        if project is None:
+            return None
+        project = Path(project)
+        # This project belongs to the motion model currently selected in the AI
+        # Motion Model control, so its own prepared rigs are that model's.
+        # FlowHMR prepares its native SMPL-H rig with a generation token
+        # (initial_flow-<token>-rig-asset.npz); every other model writes
+        # <result>_rig-<token>-asset.npz. Both are this take's own character.
+        assets = (list(project.glob('*_rig-*-asset.npz'))
+                  + list(project.glob('*-rig-asset.npz')))
+        if not assets:
+            return None
+        wanted = ''
+        try:
+            manifest = json.loads((project / 'project.json').read_text(encoding='utf-8'))
+            wanted = (manifest.get('pipeline') or {}).get('result') or ''
+        except (OSError, ValueError):
+            wanted = ''
+        def kind(path):
+            prefix = path.name[:-len('-asset.npz')].split('_rig-')[0]
+            return prefix.split('_flow-')[0]
+        chosen = [asset for asset in assets if wanted and kind(asset) == wanted]
+        asset = (chosen or sorted(assets, key=lambda path: path.stat().st_mtime_ns))[-1]
+        binding = project / (asset.name[:-len('-asset.npz')] + '-display-binding.npz')
+        # FlowHMR keeps its own SMPL-H surface, so there is no SMPL-X display
+        # binding beside it: the live worker then skins the base surface with
+        # this take's rig, which still brings that person's proportions.
+        return (asset, binding if binding.is_file() else None)
+
+    def start_live_body(self):
+        """Present the live character: feed it frames and follow its solves.
+
+        The solver may already be loading from when the source opened (see
+        warm_live_solver), so this only has to hand the stream over unless
+        nothing was warmed.
+        """
+        if getattr(self, 'live_channel', None) is None and not self._start_live_worker():
+            return
+        self.live_warmup = False
+        self._live_character_ready = False
+        self.live_shown = 0
+        self.start_live_feed()
+        timer = getattr(self, 'live_poll_timer', None)
+        if timer is None:
+            timer = self.live_poll_timer = QTimer(self)
+            timer.setInterval(120)
+            timer.timeout.connect(self.poll_live_body)
+        timer.start()
+        # The first pose cannot appear until the solver has warmed up its own
+        # frames, so the view counts that wait out in numbers (step, percent,
+        # seconds) instead of staying bare.
+        self._live_progress_started = time.monotonic()
+        self.update_live_progress()
+        session = getattr(self, 'camera_session', None)
+        self.filename.setText(f'{getattr(session, "label", "Live camera")} · '
+                              'the character is loading in the 3D view')
+
+    def update_live_progress(self):
+        """The 3D view's wait numbers: the worker's step, percent, elapsed time.
+
+        The model load and the first inference are the only slow part of a live
+        session; naming the step and counting the seconds tells the user the
+        solver is working rather than stuck.
+        """
+        view = self.motion_view
+        started = getattr(self, '_live_progress_started', None)
+        seconds = time.monotonic() - started if started is not None else 0.0
+        report = {}
+        path = getattr(self, '_live_progress_file', None)
+        if path is not None:
+            try:
+                report = json.loads(Path(path).read_text(encoding='utf-8'))
+            except (OSError, ValueError, TypeError):
+                report = {}
+        if not isinstance(report, dict):
+            report = {}
+        try:
+            step = int(report.get('step', 0) or 0)
+            steps = int(report.get('of', 0) or 0) or 5
+            within = min(max(float(report.get('within', 0.0) or 0.0), 0.0), 1.0)
+        except (TypeError, ValueError):
+            step, steps, within = 0, 5, 0.0
+        percent = 0.0 if step <= 0 else (min(step, steps) - 1 + within) / steps * 100.0
+        view.live_progress = {
+            'title': 'Live character is starting',
+            'stage': str(report.get('detail') or 'Waiting for the solver'),
+            'percent': percent,
+            'seconds': seconds,
+            'step': step,
+            'steps': steps,
+        }
+        view.update()
+
+    def warm_live_solver(self):
+        """Present the live character with the source, no button needed.
+
+        The channel exists as soon as the source opens, so the solver works on
+        the video while it plays, and the view shows the character from the
+        first solved pose on. Find person is then a confirmation, not the
+        switch that starts it.
+        """
+        session = getattr(self, 'camera_session', None)
+        if session is None or not session.running:
+            return False
+        if getattr(self, 'live_channel', None) is not None:
+            return False
+        self.start_live_body()
+        self.live_warmup = True
+        self.status.setText('The live character follows the source once its first '
+                            'pose is ready.')
+        return True
+
+    def preloaded_worker_alive(self):
+        worker = getattr(self, 'preload_worker', None)
+        return worker is not None and worker.poll() is None
+
+    def preload_live_solver(self):
+        """Load the live models at app start, before any source is opened.
+
+        The worker loads YOLO and SAM 3D Body, then idles until a live channel
+        is handed over, so the first Find person of the session moves the
+        character instead of waiting for a model load.
+        """
+        if getattr(self, 'camera_session', None) is not None:
+            return False
+        if getattr(self, 'live_channel', None) is not None:
+            return False
+        if self.preloaded_worker_alive():
+            return True
+        if getattr(self, 'busy', False):
+            # A reconstruction owns the GPU; preloading would compete with it.
+            return False
+        python = ROOT / 'runtime_exmr' / 'python.exe'
+        if not python.is_file():
+            python = Path(sys.executable)
+        try:
+            log = (ROOT / 'cache' / 'live-preload.log').open('wb')
+        except OSError:
+            return False
+        from .camera_capture import CREATE_NO_WINDOW, assign_to_job
+        from .live_channel import progress_file
+        try:
+            worker = subprocess.Popen([str(python), '-B', '-m', 'mocap.live_worker', '--preload',
+                                       '--progress', str(progress_file(ROOT, 'preload'))],
+                                      cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT,
+                                      creationflags=CREATE_NO_WINDOW)
+        except OSError:
+            log.close()
+            return False
+        assign_to_job(worker)
+        self.preload_worker, self.preload_log = worker, log
+        self.preload_progress_file = progress_file(ROOT, 'preload')
+        return True
+
+    def adopt_preloaded_worker(self):
+        """Hand the live channel to a worker whose models are already loaded."""
+        if not self.preloaded_worker_alive():
+            self.stop_preloaded_worker()
+            return False
+        marker = ROOT / 'cache' / 'live-warm-channel.txt'
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(self.live_channel.name, encoding='utf-8')
+        except OSError:
+            return False
+        self.live_worker, self.preload_worker = self.preload_worker, None
+        self.live_worker_log, self.preload_log = getattr(self, 'preload_log', None), None
+        # The models are already loaded: the wait from here is the first pose,
+        # and this worker reports that step itself.
+        self._live_progress_file = getattr(self, 'preload_progress_file', None)
+        return True
+
+    def stop_preloaded_worker(self):
+        """Release the app-start worker, or forget one that already exited."""
+        worker, self.preload_worker = getattr(self, 'preload_worker', None), None
+        log, self.preload_log = getattr(self, 'preload_log', None), None
+        live_marker(ROOT).unlink(missing_ok=True)
+        if worker is not None and worker.poll() is None:
+            try:
+                worker.terminate()
+                worker.wait(5.0)
+            except (OSError, subprocess.TimeoutExpired):
+                worker.kill()
+                try:
+                    worker.wait(3.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        if log is not None:
+            try:
+                log.close()
+            except OSError:
+                pass
+        return worker is not None
+
+    def _start_live_worker(self):
+        """One worker process solving SAM 3D Body per frame, not yet presented.
+
+        Preview only: the timeline is left alone and no frame is stored, so a
+        rehearsal costs nothing and Record window is the only capture.
+        """
+        from .live_body_solve import LiveBody, cached_rest
+        from .live_channel import LiveChannel, progress_file
+        from .models import BY_KEY
+        if getattr(self, 'live_channel', None) is not None:
+            return getattr(self, 'live_worker', None) is not None
+        session = getattr(self, 'camera_session', None)
+        if session is None or not session.running:
+            return False
+        try:
+            channel = LiveChannel('rgbmocap-live-%s' % uuid.uuid4().hex[:12], session.preview_width,
+                                  session.preview_height, create=True)
+        except OSError as error:
+            self.filename.setText(f'Live character unavailable: {error}')
+            return False
+        self.live_channel = channel
+        self._live_mesh_asset = None
+        self._live_mesh_binding = None
+        # The character the view already presents for the open take IS the live
+        # character: its prepared rig brings that person's proportions, and its
+        # skin binding is the one the result view renders with. Only without a
+        # take does the neutral base character stand in.
+        character_binding = getattr(self.motion_view, 'mesh_binding', None)
+        binding_path = ''
+        try:
+            if character_binding and character_binding.get('key'):
+                binding_path = str(character_binding['key'][0])
+        except (AttributeError, IndexError, TypeError):
+            binding_path = ''
+        prepared = self.live_character_files()
+        rig_path = str(prepared[0]) if prepared else ''
+        # A binding left over from another model's project would dress the live
+        # character as that model's person, so only this project's own skin or
+        # the take's prepared binding counts.
+        project = Path(self.project).resolve() if getattr(self, 'project', None) else None
+        if binding_path and project is not None and not Path(binding_path).resolve().is_relative_to(project):
+            binding_path = ''
+        binding_path = binding_path if Path(binding_path).is_file() else (
+            str(prepared[1]) if prepared and prepared[1] else '')
+        supplied = {}
+        if rig_path and Path(rig_path).is_file():
+            try:
+                with np.load(rig_path, allow_pickle=False) as data:
+                    supplied = dict(rest=data['rest'], parents=data['parents'], ends=data['ends'],
+                                    alignment=data['anatomical_calibration'])
+            except (OSError, ValueError, KeyError):
+                supplied = {}
+        if supplied and binding_path:
+            try:
+                with np.load(binding_path, allow_pickle=False) as data:
+                    self._live_mesh_binding = {key: data[key] for key in
+                                               ('vertices', 'frames', 'local', 'rest',
+                                                'parents', 'betas')}
+                self._live_mesh_binding['key'] = ('live-binding', Path(binding_path).stat().st_mtime_ns)
+            except (OSError, ValueError, KeyError):
+                self._live_mesh_binding = None
+                supplied = {}
+        try:
+            body = (LiveBody(rig=supplied) if supplied
+                    else LiveBody(cached_rest(ROOT, BY_KEY['smplx'].path)))
+        except Exception as error:
+            self.filename.setText(f'Live character unavailable: {error}')
+            self.stop_live_body()
+            return False
+        # Imported characters are posed from this same rig, in the 3D view's own
+        # character layer: they move with the video as each pose arrives.
+        self.clear_live_characters()
+        self._live_source_rest = np.asarray(body.rig['rest'][:22], dtype=np.float64).copy()
+        if getattr(self, 'follow_source', False):
+            self.prepare_live_characters()
+        # Bones and character are the view's own display modes; live only feeds
+        # them, so the overlay and mesh toggle behave as they do for a result.
+        from .bone_overlay import geometry
+        self._live_bones_visible = self.motion_view.show_bones
+        self.live_bones_asset = geometry(body.rig['rest'], body.rig['parents'], body.rig['ends'],
+                                         ('live', channel.name))
+        self.motion_view.target_asset = {'bones': self.live_bones_asset,
+                                         'key': self.live_bones_asset['key'], 'mode': 'rig'}
+        self.motion_view.target_frames = channel.rig_frames
+        self.motion_view.frame_stamp = 0
+        # The solver needs the ExMR runtime's packages (braceexpand, ultralytics);
+        # fall back to this process's interpreter in developer layouts.
+        # Models loaded at app start need only the new channel: hand it over
+        # instead of loading them a second time.
+        if not supplied and self.adopt_preloaded_worker():
+            self._live_character_ready = False
+            return True
+        self.stop_preloaded_worker()
+        python = ROOT / 'runtime_exmr' / 'python.exe'
+        if not python.is_file():
+            python = Path(sys.executable)
+        log = (ROOT / 'cache' / 'live-worker.log').open('wb')
+        self.live_worker_log = log
+        from .camera_capture import CREATE_NO_WINDOW, assign_to_job
+        self._live_progress_file = progress_file(ROOT, channel.name)
+        command = [str(python), '-B', '-m', 'mocap.live_worker', '--channel', channel.name,
+                   '--progress', str(self._live_progress_file)]
+        if supplied:
+            command += ['--rig', rig_path]
+            if binding_path and Path(binding_path).is_file():
+                command += ['--binding', binding_path]
+        self.live_worker = subprocess.Popen(
+            command, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT, creationflags=CREATE_NO_WINDOW)
+        assign_to_job(self.live_worker)
+        self._live_character_ready = False
+        return True
+
+    def feed_live_frames(self):
+        channel = getattr(self, 'live_channel', None)
+        boxes = getattr(self, 'live_box_channel', None)
+        session = getattr(self, 'camera_session', None)
+        if session is None or (channel is None and boxes is None):
+            return
+        if getattr(session, 'ended', False) and not getattr(self, '_live_source_ended', False):
+            # A clip link ends by itself; a camera never does. Say so instead
+            # of leaving a frozen frame under a live label.
+            self._live_source_ended = True
+            self.filename.setText('Live link finished · open the link again to replay it')
+        frame = session.snapshot()
+        if frame is None:
+            return
+        if channel is not None:
+            channel.write_frame(frame)
+        if boxes is not None:
+            boxes.write_frame(frame)
+
+    def poll_live_body(self):
+        channel = getattr(self, 'live_channel', None)
+        if channel is None:
+            return
+        from .live_channel import CALIBRATING, FAILED
+        if channel.state() == CALIBRATING:
+            self.fps_label.setText('Live camera · the solver is calibrating depth')
+            return
+        if channel.state() == FAILED:
+            self.live_poll_timer.stop()
+            self.filename.setText('Live solver failed: ' + channel.error()[:140])
+            return
+        self.update_live_progress()
+        count = channel.count()
+        if count <= 0:
+            worker = getattr(self, 'live_worker', None)
+            if worker is not None and worker.poll() is not None:
+                # The process that solves the live body is gone, so nothing can
+                # arrive on this channel. Say so instead of waiting forever, and
+                # leave Find person able to start the character again.
+                timer, self.live_poll_timer = self.live_poll_timer, None
+                if timer is not None:
+                    timer.stop()
+                self.live_channel = None
+                self.live_worker = None
+                self.filename.setText('The live character stopped. Press Find person to start it again.')
+            return
+        if not getattr(self, '_live_person_row', False):
+            # The performer being followed is named in People, so the row and
+            # the 3D view agree on who is on screen.
+            self._live_person_row = True
+            box = channel.box()
+            self.show_live_person(self.live_person_icon(box))
+        if getattr(self.motion_view, 'live_message', '') or getattr(self.motion_view, 'live_progress', None):
+            self.motion_view.live_message = ''
+            self.motion_view.live_progress = None
+        if count == getattr(self, 'live_shown', 0):
+            return
+        from .preview_data import motion_summary
+        # The newest frame only: live is a mirror of the performer, not a take.
+        # Filling the timeline made the preview look (and cost) like a recording,
+        # and nothing is captured until Record window.
+        joints = channel.joints_latest(count)
+        # The floor and framing come from the recent window, so they do not bob
+        # with every solved frame.
+        recent = channel.joints_view(count)
+        self.motion_view.live_body_mode = True
+        self.motion_view.set_motion(joints, motion_summary(recent[-30:]), None)
+        # The follower wears the BASE CHARACTER: the take's own SMPL-X mesh,
+        # driven by the same packed frames a Prepare Mesh result uses.
+        if self._live_mesh_asset is None:
+            assets = sorted(ROOT.glob('models/body_models/smplx/.mesh-lbs-v*.npz'))
+            if assets:
+                with np.load(assets[-1], allow_pickle=False) as data:
+                    self._live_mesh_asset = {key: data[key] for key in
+                                             ('packed', 'faces', 'offsets', 'neighbors', 'vertex_count')}
+                self._live_mesh_asset['key'] = ('live-mesh', assets[-1].name)
+        if self._live_mesh_binding is None:
+            # The follower's base character is skinned from this binding; the
+            # worker writes it before the first inference.
+            package = ROOT / 'cache' / 'live-binding.npz'
+            if package.is_file():
+                try:
+                    with np.load(package, allow_pickle=False) as data:
+                        self._live_mesh_binding = {key: data[key] for key in
+                                                   ('vertices', 'frames', 'local', 'rest',
+                                                    'parents', 'betas')}
+                    self._live_mesh_binding['key'] = ('live-binding', package.stat().st_mtime_ns)
+                except (OSError, ValueError, KeyError):
+                    self._live_mesh_binding = None
+        # An imported character is the model of the session: it takes the base
+        # body's place while it is visible, and the base body comes back when
+        # every imported character is hidden (or none has a live rig yet).
+        poses = self.update_live_characters(channel.rig_latest())
+        # Display > Characters Only hides the base body in the live view too.
+        hide_body = bool(poses) and self.motion_view.characters_only_active()
+        if poses and not getattr(self, '_live_character_ready', False):
+            self._live_character_ready = True
+            names = ', '.join(c['name'] for c in self.characters if c['id'] in poses)
+            self.status.setText(f'{names} follows the video.')
+        if hide_body:
+            self.motion_view.mesh_frames = None
+            self.motion_view.mesh_asset = None
+            self.motion_view.mesh_binding = None
+        body_shown = (not hide_body
+                      and self._live_mesh_asset is not None
+                      and self._live_mesh_binding is not None
+                      and channel.mesh_count() > 0)
+        if body_shown:
+            self.motion_view.mesh_asset = self._live_mesh_asset
+            self.motion_view.mesh_frames = channel.mesh_latest
+            self.motion_view.mesh_binding = self._live_mesh_binding
+            if not getattr(self, '_live_character_ready', False):
+                self._live_character_ready = True
+                self.status.setText('Live character is following the video.')
+        # Bones above the skinned character: the view's own display modes, as
+        # they are for a prepared result.
+        self.motion_view.index = 0
+        self.motion_view.frame_stamp = count
+        self.motion_view.update()
+        self.live_shown = count
+        label = getattr(getattr(self, 'camera_session', None), 'label', 'Live camera')
+        self.fps_label.setText(f'{label} · solver {channel.worker_fps():.1f} fps')
+        self.filename.setText(f'{label} · the character follows the video in the 3D view'
+                              if label.startswith('Live link')
+                              else 'Live camera · the character follows you in the 3D view')
+
+    def restart_live_character(self):
+        """Bring the live character back with the model that is now selected.
+
+        Find person starts the character once and then leaves it running, so a
+        model switch would keep the live view following the previous model's
+        rig. Restarting it is what makes the live view present the selected
+        model's own character.
+        """
+        if getattr(self, 'live_channel', None) is None:
+            return
+        self.stop_live_body()
+        session = getattr(self, 'camera_session', None)
+        if session is None or not session.running:
+            return
+        try:
+            self.start_live_body()
+        except Exception as error:          # noqa: BLE001 - reported, not fatal
+            self.status.setText('Live character failed: ' + str(error)[:160])
+
+    def stop_live_body(self):
+        channel = getattr(self, 'live_channel', None)
+        if channel is None:
+            return
+        from .live_channel import STOP
+        channel.set_state(STOP)
+        worker = getattr(self, 'live_worker', None)
+        if worker is not None:
+            # A worker that is still loading its model ignores the stop state for
+            # a while; timing out is the normal case and must not abort the stop.
+            try:
+                worker.wait(10.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if worker.poll() is None:
+                worker.kill()
+            try:
+                worker.wait(5.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            self.live_worker = None
+        log = getattr(self, 'live_worker_log', None)
+        if log is not None:
+            log.close()
+            self.live_worker_log = None
+        timer, self.live_poll_timer = getattr(self, 'live_poll_timer', None), None
+        if timer is not None:
+            timer.stop()
+        self.live_channel = None
+        self.clear_live_characters()
+        self.live_shown = 0
+        self.live_warmup = False
+        live_marker(ROOT).unlink(missing_ok=True)
+        self.motion_view.live_message = ''
+        self.motion_view.live_progress = None
+        self._live_progress_started = None
+        self._live_progress_file = None
+        self.motion_view.live_body_mode = False
+        self.motion_view.set_motion(None, None, None)
+        self.motion_view.target_frames = None
+        self.motion_view.target_asset = None
+        self.motion_view.frame_stamp = None
+        self.motion_view.show_bones = getattr(self, '_live_bones_visible', True)
+        self.motion_view.mesh_frames = None
+        self.motion_view.mesh_asset = None
+        self.motion_view.mesh_binding = None
+        self._live_mesh_binding = None
+
+    def stop_live_camera(self):
+        """Stop the live camera and its capture."""
+        self.source_audio.stop()
+        self.stop_live_body()
+        self.stop_live_box()
+        self.stop_live_feed()
+        session = getattr(self, 'camera_session', None)
+        if session is not None:
+            session.stop()
+        self.camera_session = None
+        self.video_view.close_camera()
+        self.show_link_playback(None)
+        if getattr(self, '_live_person_row', False):
+            # Nothing was tracked or saved, so the live row leaves with it.
+            self._live_person_row = False
+            self.reset_people()
+        self.live_record_button.setVisible(False)
+        self.live_stop_button.setVisible(False)
+        self.fps_label.setText('No clip loaded')
+        self.filename.setText('Live camera stopped')
+
+        # Keep the models warm for the next live source.
+        QTimer.singleShot(2500, self.preload_live_solver)
+        self.update_people_readiness()
+
+    def record_live_window(self):
+        """Record one window from the live camera, load it, and resume live.
+
+        The window is a capture of its own so its first and last frame are
+        exactly the user's press: a cut out of the running live capture cannot
+        do that, because this camera encodes slower than it films and the file
+        falls behind the picture (measured: 12-21 fps written at 1080p). The
+        live character keeps following while the window records - the recorder
+        writes the same frames to the live solver.
+        """
+        session = getattr(self, 'camera_session', None)
+        if session is None or self.busy:
+            return
+        # The live session is running by definition - recording REPLACES it:
+        # the camera is freed, one window is captured, and live resumes.
+        from . import camera_capture
+        device = session.device
+        width, height = session.capture_width, session.capture_height
+        fps = session.fps
+        preview_width = session.preview_width
+        rotation = session.rotation
+        session.stop()
+        self.video_view.close_camera()
+        self.camera_session = None
+        record_session = None
+        for _attempt in range(6):
+            record_session = camera_capture.Session(
+                camera_capture.default_path(ROOT),
+                device, width, height, fps, preview_width=preview_width,
+                rotation=rotation)
+            record_session.start()
+            time.sleep(2.5)
+            if record_session.running:
+                break
+            record_session.stop()
+            record_session = None
+            time.sleep(1.0)
+        if record_session is None or not record_session.running:
+            self.filename.setText('The camera would not reopen for recording.')
+            return
+        self.camera_session = record_session
+        self.video_view.open_camera(record_session)
+        self.live_stop_button.setVisible(True)
+        self.live_record_button.setVisible(False)
+        self.filename.setText(f'Recording a {self.live_window_seconds}s window...')
+
+        def finish():
+            report = record_session.stop()
+            self.camera_session = None
+            path = report.get('path')
+            if path and Path(path).is_file():
+                # The live presenter would keep repainting the capture's last
+                # frame over the freshly decoded window.
+                self.video_view.close_camera()
+                self.load_video(Path(path))
+                # The file decoder's metadata has to land before the camera
+                # replaces it: open_camera shuts the decoder down, and a
+                # decoder killed before its metadata leaves the load
+                # unreadable forever. Wait for the readable flag.
+                waited = 0.0
+                while not self.video_readable and waited < 15.0:
+                    QApplication.processEvents()
+                    time.sleep(0.1)
+                    waited += 0.1
+            # resume live: reopen the camera and keep the loop. The dshow
+            # release after a capture takes a few seconds - the retries have
+            # to outlast it.
+            resume = camera_capture.Session(
+                camera_capture.default_path(ROOT),
+                device, width, height, fps, preview_width=preview_width,
+                rotation=rotation)
+            for _attempt in range(8):
+                resume.start_preview()
+                time.sleep(2.5)
+                if resume.running:
+                    break
+                resume.stop()
+                resume = None
+                time.sleep(1.0)
+            if resume is not None and resume.running:
+                self.start_live_camera(resume)
+                self.filename.setText('Live camera resumed · the recorded window is loading')
+            # One press gives the take and its motion: the window that was just
+            # kept runs through the normal reconstruction right away.
+            if path and Path(path).is_file():
+                self.status.setText('Window kept · reconstructing its motion...')
+                self.run_full()
+
+        QTimer.singleShot(int(self.live_window_seconds * 1000), finish)
+
+    def choose_video_url(self, url=''):
+        """Preview one video link as the live source without saving it.
+
+        Full reconstruction re-reads a clip, so it needs the file: the
+        Download button beside the video title saves this link once.
+        """
+        from .video_url import VideoUrlDialog
+        if self.busy:
+            return
+        dialog = VideoUrlDialog(self, url)
+        try:
+            if dialog.exec() != QDialog.Accepted:
+                return
+            if dialog.path is not None:
+                self.load_video(Path(dialog.path))
+            elif dialog.url:
+                self.live_from_url(dialog.url)
+        finally:
+            dialog.deleteLater()
+
+    def download_source(self):
+        """Keep the previewed link on disk and open it as a normal video.
+
+        The live preview streams a link frame by frame, which is all the
+        character needs. Every reconstruction stage reads the clip several
+        times, so that path still needs one download - on request, here.
+        """
+        url = getattr(self, 'source_url', '')
+        if not url:
+            self.status.setText('Preview a link first (File > Open Video from URL).')
+            return
+        if self.busy or getattr(self, 'source_fetch', None) is not None:
+            return
+        from .paths import DOWNLOADS
+        from .video_url import FetchVideo
+        fetch = FetchVideo(url, DOWNLOADS, self)
+        self.source_fetch = fetch
+        self.source_download.setEnabled(False)
+        fetch.progress.connect(self.source_download_progress)
+        fetch.fetched.connect(self.source_downloaded)
+        fetch.failed.connect(self.source_download_failed)
+        fetch.start()
+        self.status.setText('Downloading the link into the downloads folder...')
+
+    def source_download_progress(self, done, total):
+        if total > 0:
+            self.status.setText(f'Downloading the link {done / 1024 ** 2:.1f} of '
+                                f'{total / 1024 ** 2:.1f} MB')
+        else:
+            self.status.setText('Downloading the link...')
+
+    def source_downloaded(self, path):
+        self.close_source_fetch()
+        self.status.setText('Link saved. Opening it as a video...')
+        self.load_video(Path(path))
+
+    def source_download_failed(self, message):
+        self.close_source_fetch()
+        self.status.setText('The link could not be downloaded: ' + str(message)[:200])
+
+    def close_source_fetch(self):
+        fetch, self.source_fetch = getattr(self, 'source_fetch', None), None
+        if fetch is not None:
+            try:
+                fetch.wait()
+            except (OSError, RuntimeError):
+                pass
+            fetch.deleteLater()
+        self.source_download.setEnabled(bool(getattr(self, 'source_url', '')))
+
     def load_video(self, path):
         if self._pear_active:return self.load_pear_videos([path])
         if self.model_choice.currentData()=='mamma':
             return self.load_mamma_videos([path])
+        import traceback as _tb
         try:
+            # Opening another video replaces the live view. A source left
+            # running behind it would keep pulling camera frames or network
+            # video for nobody, so it is stopped first.
+            if getattr(self, 'camera_session', None) is not None:
+                self.stop_live_camera()
             if self.workspace_root is not None:self.remember_workspace_model()
             self.clear_mamma_inputs()
             self.workspace_root=None;self._workspace_video_reference=False;self._workspace_camera=None
@@ -719,6 +1972,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
             self.video_view.open(path)
             self.update_readiness()
         except Exception as error:
+            print('LOAD: ERROR', _tb.format_exc()[-600:], flush=True)
             QMessageBox.warning(self, "Video Error", str(error))
 
     def video_ready(self, info):
@@ -908,6 +2162,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.motion_view.index = index
         self.motion_view.scene_time=self.source_offset+index/(self.info['fps'] if self.info else 30)
         self.motion_view.update()
+        self.publish_live_frame(index)
         if self.timer.isActive():
             now = time.perf_counter()
             self.presented_times.append(now)
@@ -917,16 +2172,285 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
                 actual = (len(self.presented_times) - 1) / (now - self.presented_times[0])
                 self.fps_label.setText(f"Source {self.info['fps']:.2f} | Play {actual:.1f} fps")
 
+    def live_pose(self, index):
+        """Canonical 22-joint pose of what is on screen, in app world space."""
+        view = self.motion_view
+        if view.people_mode and view.people_scene is not None:
+            actors = view.scene_actors()
+            chosen = next(((take, frame) for take, frame in actors
+                           if take.ident == view.scene_selected), None)
+            if chosen is None:
+                chosen = actors[0] if actors else None
+            return view.scene_joint_points(*chosen) if chosen else None
+        if view.joints is None:
+            return None
+        return view.joints[max(0, min(int(index), len(view.joints) - 1))]
+
+    def live_body_frame(self, index):
+        """The take on screen whose base body can be streamed, with its frame."""
+        from .live_body import for_project
+        view = self.motion_view
+        if getattr(view, 'people_mode', False) and view.people_scene is not None:
+            actors = view.scene_actors()
+            chosen = next(((take, frame) for take, frame in actors
+                           if take.ident == view.scene_selected), None)
+            if chosen is None:
+                chosen = actors[0] if actors else None
+            if chosen is None:
+                return None
+            take, frame = chosen
+            body = for_project(take.project)
+            return (body, int(frame), getattr(take, 'transform', None)) if body else None
+        if self.project is None:
+            return None
+        body = for_project(self.project)
+        return (body, int(index), None) if body else None
+
+    def publish_live_frame(self, index):
+        # Cascadeur is a second, independent receiver: it is updated before the
+        # Blender branch below, which returns early whenever it has something
+        # to send.
+        self.publish_cascadeur_frame(index)
+        link = getattr(self, 'live_link', None)
+        if link is None or not link.active:
+            return
+        try:
+            fps = self.info['fps'] if self.info else 30
+            frames = self.info['frames'] if self.info else None
+            # A character on screen is streamed as itself: its own rest file,
+            # palette and bone matrices, so Blender shows the same rig.
+            take = self.character_live_take() if getattr(self, 'characters', None) else None
+            if take is not None:
+                char, path, frame, transform, matrix = take
+                info = self.character_live_info(path)
+                if info is not None:
+                    link.publish_character(info['blend'], info['palette'], info['armature'],
+                                           matrix, frame, fps, frames, char.get('name', ''),
+                                           transform, info.get('height'))
+                    return
+            # The app's own base body: its SMPL surface skinned to the export
+            # skeleton, so Blender shows what is on screen without any import.
+            body_frame = self.live_body_frame(index)
+            if body_frame is not None:
+                body, body_index, body_transform = body_frame
+                link.publish_character(body.rest_file(), body.names, 'RGBMoCap Body',
+                                       body.matrices(body_index), body_index, body.fps,
+                                       body.count, getattr(self.motion_view, 'actor_name', ''),
+                                       body_transform, body.height, rest_format='npz')
+                return
+            joints = self.live_pose(index)
+            if joints is None:
+                return
+            link.publish_joints(joints, index, fps, frames,
+                                getattr(self.motion_view, 'actor_name', ''))
+        except Exception as error:
+            self.log.append('Live link: ' + str(error))
+
+    def publish_live_character(self):
+        """Send the character on screen first, so Blender imports it before poses."""
+        link = getattr(self, 'live_link', None)
+        if link is None or not link.active or not getattr(self, 'characters', None):
+            return
+        try:
+            take = self.character_live_take()
+            if take is None:
+                # The take may not be playing or loaded yet; its rest file is
+                # still the right thing to import first.
+                char = next((c for c in self.characters if c.get('visible', True)), None)
+                if char is None:
+                    return
+                takes = char.get('takes') or []
+                folder = char.get('animation', '') + '/' + takes[-1]['folder'] if takes else ''
+                take = (char, self.character_path(folder or char['asset']), 0,
+                        takes[-1].get('transform') if takes else None, None)
+            char, path, frame, transform, _matrix = take
+            info = self.character_live_info(path)
+            if info is None:
+                return
+            link.publish_character(info['blend'], info['palette'], info['armature'], None,
+                                   frame, self.info['fps'] if self.info else 30,
+                                   self.info['frames'] if self.info else None,
+                                   char.get('name', ''), transform, info.get('height'))
+        except Exception as error:
+            self.log.append('Live link: ' + str(error))
+
+    def toggle_live_link(self, enabled):
+        if not enabled:
+            link = getattr(self, 'live_link', None)
+            if link is not None:
+                link.stop()
+            self.status.setText('Live link stopped.')
+            return
+        from .live_link import LiveLink, default_port
+        link = getattr(self, 'live_link', None)
+        if link is None:
+            self.live_link = link = LiveLink(port=default_port())
+        ok, message = link.start()
+        self.log.append('Live link: ' + message)
+        if not ok:
+            self.status.setText(message)
+            action = getattr(self, 'live_link_action', None)
+            if action is not None:
+                action.blockSignals(True)
+                action.setChecked(False)
+                action.blockSignals(False)
+            return
+        self.status.setText('Live link listening on %s. In Blender: RGB MoCap > Start Live Link.'
+                            % link.status()['address'])
+        # Send the character itself first, then its current pose: Blender
+        # appends the app's own rest file before any bone transform arrives.
+        self.publish_live_character()
+        self.publish_live_frame(getattr(self.motion_view, 'index', 0) or 0)
+
+    def cascadeur_poll_timer(self):
+        """The timer that watches a connection attempt finishing.
+
+        Connecting posts a script to Cascadeur and waits for its receiver to
+        answer, which is seconds not milliseconds. Doing that from the menu
+        would freeze the window, and updating it from the worker thread is not
+        allowed, so the worker leaves its answer here and this picks it up.
+        """
+        timer = getattr(self, 'cascadeur_poll', None)
+        if timer is None:
+            self.cascadeur_poll = timer = QTimer(self)
+            timer.setInterval(120)
+            timer.timeout.connect(self.poll_cascadeur_link)
+        return timer
+
+    def send_base_character(self):
+        """Import the T-pose base body into a new Cascadeur scene and check it."""
+        from .cascadeur_link import CascadeurLink, base_character_path
+        fbx = base_character_path(Path(__file__).resolve().parents[1])
+        if not fbx.is_file():
+            message = ('the base character is missing at %s; export it once with '
+                       'tools/send-base-body-to-cascadeur.py' % fbx)
+            self.log.append('Cascadeur: ' + message)
+            self.status.setText('Cascadeur: ' + message)
+            return
+        self.status.setText('Cascadeur: sending the base character...')
+        outcome = {}
+
+        def work():
+            try:
+                outcome['value'] = CascadeurLink().send_character(fbx)
+            except Exception as error:      # noqa: BLE001 - reported in the window
+                outcome['value'] = (False, str(error), {})
+
+        threading.Thread(target=work, name='rgbmocap-cascadeur-character',
+                         daemon=True).start()
+
+        def poll():
+            if 'value' not in outcome:
+                QTimer.singleShot(200, poll)
+                return
+            ok, message, checks = outcome['value']
+            self.log.append('Cascadeur: ' + message)
+            self.status.setText('Cascadeur: ' + message)
+            if ok:
+                self.log.append('Cascadeur: base character ready. Now check '
+                                'File > Live Link to Cascadeur.')
+
+        QTimer.singleShot(200, poll)
+
+    def toggle_cascadeur_link(self, enabled):
+        from .cascadeur_link import CascadeurLink
+        link = getattr(self, 'cascadeur_link', None)
+        if not enabled:
+            self.cascadeur_poll_timer().stop()
+            if link is not None:
+                link.stop()
+                try:
+                    link.disconnect()
+                except Exception as error:      # noqa: BLE001 - logged, not raised
+                    self.log.append('Cascadeur: ' + str(error))
+            self.status.setText('Cascadeur live link stopped.')
+            return
+        if link is None:
+            self.cascadeur_link = link = CascadeurLink()
+        self.status.setText('Connecting to Cascadeur...')
+        self.cascadeur_outcome = None
+
+        def work():
+            try:
+                self.cascadeur_outcome = link.connect()
+            except Exception as error:          # noqa: BLE001 - shown, not raised
+                self.cascadeur_outcome = (False, str(error))
+
+        threading.Thread(target=work, name='rgbmocap-cascadeur-connect', daemon=True).start()
+        self.cascadeur_poll_timer().start()
+
+    def poll_cascadeur_link(self):
+        outcome = getattr(self, 'cascadeur_outcome', None)
+        if outcome is None:
+            return
+        action = getattr(self, 'cascadeur_link_action', None)
+        if action is not None and not action.isChecked():
+            # Stopped while the connection was still being made.
+            self.cascadeur_outcome = None
+            self.cascadeur_poll_timer().stop()
+            return
+        self.cascadeur_outcome = None
+        self.cascadeur_poll_timer().stop()
+        ok, message = outcome
+        self.log.append('Cascadeur: ' + message)
+        if not ok:
+            self.cascadeur_link_failed(message)
+            return
+        frame = getattr(self.motion_view, 'index', 0) or 0
+        found = self.live_body_frame(frame)
+        if found is None:
+            self.status.setText('Cascadeur linked. Play a reconstructed take to stream it.')
+            return
+        body, index, _transform = found
+        ok, message = self.cascadeur_link.start(body, index)
+        self.log.append('Cascadeur: ' + message)
+        if not ok:
+            self.cascadeur_link_failed(message)
+            return
+        self.status.setText(message)
+
+    def cascadeur_link_failed(self, message):
+        self.status.setText('Cascadeur: ' + message)
+        action = getattr(self, 'cascadeur_link_action', None)
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(False)
+            action.blockSignals(False)
+
+    def publish_cascadeur_frame(self, index):
+        link = getattr(self, 'cascadeur_link', None)
+        if link is None or not link.active:
+            return
+        try:
+            found = self.live_body_frame(index)
+            if found is None:
+                return
+            body, body_index, _transform = found
+            if body is not link.body:
+                # A different take or person came on screen: rebind and rewind
+                # rather than writing one take's frames into another's timeline.
+                ok, message = link.start(body, body_index)
+                self.log.append('Cascadeur: ' + message)
+                if not ok:
+                    self.cascadeur_link_failed(message)
+                    return
+            link.publish(body_index)
+        except Exception as error:              # noqa: BLE001 - logged, not raised
+            self.log.append('Cascadeur live: ' + str(error))
+
     def reset_play_clock(self, *_):
         self.play_anchor = self.slider.value()
         self.play_clock.start()
         self.presented_times.clear()
         if self.timer.isActive() and self.info:
             self.timer.start(max(1, math.ceil(1000 / (self.info['fps'] * self.play_speed.currentData()))))
+            # The playhead or the speed moved: the sound restarts from there.
+            self.start_playback_audio()
 
     def stop_playback(self):
         self.timer.stop()
         self.timer_resolution.release()
+        self.source_audio.stop()
         self.set_playback_indicator(False)
         self.pear_playback_stopped()
 
@@ -951,7 +2475,62 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
             self.timer_resolution.acquire()
             self.reset_play_clock()
             self.timer.start(max(1, math.ceil(1000 / (self.info['fps'] * self.play_speed.currentData()))))
+            self.start_playback_audio()
             self.set_playback_indicator(True)
+
+    def audio_source(self):
+        """Where the preview's sound comes from, or None when it has none.
+
+        A link preview already holds the stream address and the headers that
+        address needs; a clip preview reads the same file the picture comes
+        from. A live camera has no soundtrack to play.
+        """
+        session = getattr(self, 'camera_session', None)
+        if session is not None:
+            address = getattr(session, 'audio_address', None) or getattr(session, 'address', None)
+            if not address:
+                return None
+            headers = getattr(session, 'audio_headers', None) or getattr(session, 'headers', {})
+            return dict(address=address, headers=dict(headers or {}))
+        path = getattr(self, 'video_path', None)
+        return path if path is not None else None
+
+    def start_playback_audio(self):
+        """Sound follows the playhead and the preview speed."""
+        source = self.audio_source()
+        fps = float((self.info or {}).get('fps') or 0.)
+        if source is None or fps <= 0:
+            return
+        self.source_audio.play(source, start=max(0., self.slider.value() / fps),
+                               speed=self.play_speed.currentData() or 1.)
+
+    def set_preview_volume(self, percent):
+        """Preview volume, 0-100: the source keeps playing, only quieter."""
+        self.preview_volume = max(0, min(100, int(percent))) / 100.
+        self.source_audio.set_volume(self.preview_volume)
+        mute = getattr(self, 'mute_button', None)
+        if mute is not None:
+            mute.blockSignals(True)
+            mute.setChecked(self.preview_volume <= 0)
+            mute.blockSignals(False)
+
+    def toggle_preview_mute(self, muted):
+        """Mute without losing the level the user chose."""
+        if muted:
+            self._volume_before_mute = self.volume.value() or 100
+            self.volume.setValue(0)
+        else:
+            self.volume.setValue(getattr(self, '_volume_before_mute', 100) or 100)
+
+    def start_link_audio(self, session):
+        """A link preview plays its clip again, so its sound repeats as well."""
+        address = getattr(session, 'audio_address', None) or getattr(session, 'address', None)
+        if not address:
+            return
+        headers = getattr(session, 'audio_headers', None)
+        if not headers:
+            headers = getattr(session, 'headers', {})
+        self.source_audio.play(dict(address=address, headers=dict(headers or {})), loop=True)
 
     def next_frame(self):
         if not self.timer.isActive() or self.info is None or not self.video_readable:
@@ -1040,9 +2619,32 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
                 prepare_args += ['--correction-preset',self.correction_preset.currentData(),
                                  '--correction-mode',self.correction_mode.currentData(),
                                  '--foot-lock',str(int(self.foot_lock.isChecked())),'--hand-lock',str(int(self.hand_lock.isChecked())),
+                                 '--occlusion-fill',str(int(self.occlusion_fill.isChecked())),
                                  '--pelvis-offset',str(self.pelvis_offset.value())]
+        if self.people_root is None and 'correct' in stages and RECONSTRUCTION_STAGES & set(stages):
+            self._single_result_kind = result or self.active_result
+            self._ground_after_single_batch = True
         self.start_jobs([("prepare", prepare_args)]
                         + [(stage, ["--result", result] if stage in {"export", "flow_export", "footmr", "handflow", "correct"} and result else None) for stage in stages])
+
+    def ground_lone_actor_after_reconstruction(self):
+        """Ensure a lone actor's feet land on its flat floor after reconstruction.
+
+        The corrected pass normally does this, but a cancelled, skipped or
+        settings-changed stage would leave the preview floating until a manual
+        correction. Only a missing/stale corrected result is recomputed.
+        """
+        if self.busy or self.project is None or self.people_root is not None:return
+        if not self.motion_correction.isChecked():return
+        kind=getattr(self,'_single_result_kind',None) or 'corrected_initial'
+        if not kind.startswith('corrected_'):kind='corrected_'+base_result(kind)
+        from .motion_tools import result_sources
+        bases=result_sources(base_result(kind))
+        if not all((self.project/RESULTS[base][0]).is_file() and result_is_current(self.project,base) for base in bases):return
+        if result_is_current(self.project,kind):return
+        self.status.setText('Grounding feet on the floor...')
+        self.start_jobs([(stage,['--project',str(self.project),'--result',kind])
+                         for stage in ('correct','export')],refresh_characters=True)
 
     def run_analysis(self):
         self.input_jobs(["track", "pva"])
@@ -1064,9 +2666,21 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         refine = bool(tool.refinement) and self.htd_refine.isChecked()
         foot = tool.key=='gvhmr' and self.footmr_refine.isChecked()
         correction=self.motion_correction.isChecked()
-        if correction:self.save_correction_options()
+        if correction:
+            # The automatic pass grounds a lone actor on one flat floor; Multi
+            # Level stays available for a manual Apply Correction.
+            if self.people_root is None:self.use_flat_ground()
+            self.save_correction_options()
         hand=tool.key=='gvhmr' and self.handflow_refine.isChecked()
         self.input_jobs(tool.stages(refine, foot,correction,handflow=hand), result=result_kind(refine, foot,correction,handflow=hand))
+
+    def use_flat_ground(self):
+        """Select the shared flat floor without firing change handlers."""
+        if self.correction_mode.currentData()=='flat':return
+        self.correction_mode.blockSignals(True)
+        try:self.correction_mode.setCurrentIndex(self.correction_mode.findData('flat'))
+        finally:self.correction_mode.blockSignals(False)
+        self.update_correction_description()
 
     def save_correction_options(self):
         if self.project is not None:
@@ -1082,6 +2696,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         from .correction_settings import correction_options
         return correction_options({'auto_floor':self.auto_floor.isChecked(),'floor':self.floor_height.value(),
                                    'mode':self.correction_mode.currentData(),'foot_lock':self.foot_lock.isChecked(),'hand_lock':self.hand_lock.isChecked(),
+                                   'occlusion_fill':self.occlusion_fill.isChecked(),
+                                   'floor_board':self.floor_board.isChecked(),
                                    'preset':self.correction_preset.currentData(),'pelvis_offset':self.pelvis_offset.value()})
 
     def update_correction_description(self):
@@ -1099,20 +2715,28 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
     def restore_correction_options(self, options):
         from .correction_settings import correction_options
         options=correction_options(options)
-        controls=(self.correction_mode,self.correction_preset,self.auto_floor,self.floor_height,self.pelvis_offset,self.foot_lock,self.hand_lock)
+        controls=(self.correction_mode,self.correction_preset,self.auto_floor,self.floor_height,self.pelvis_offset,self.foot_lock,self.hand_lock,self.occlusion_fill,self.floor_board)
         for control in controls:control.blockSignals(True)
         try:
-            self.correction_preset.setCurrentIndex(self.correction_preset.findData(options['preset']))
-            self.correction_mode.setCurrentIndex(self.correction_mode.findData(options['mode']))
-            self.foot_lock.setChecked(options['foot_lock']);self.hand_lock.setChecked(options['hand_lock'])
-            self.auto_floor.setChecked(options['auto_floor']);self.floor_height.setValue(options['floor'])
-            self.pelvis_offset.setValue(options['pelvis_offset'])
+            # An empty options dict (a fresh load) keeps the current state:
+            # the .get defaults are each control's own value.
+            def _opt(key, widget):
+                return options[key] if key in options else (widget.isChecked() if hasattr(widget, 'isChecked') else widget.value())
+            self.correction_preset.setCurrentIndex(self.correction_preset.findData(_opt('preset', self.correction_preset)))
+            self.correction_mode.setCurrentIndex(self.correction_mode.findData(_opt('mode', self.correction_mode)))
+            self.foot_lock.setChecked(_opt('foot_lock', self.foot_lock));self.hand_lock.setChecked(_opt('hand_lock', self.hand_lock))
+            self.occlusion_fill.setChecked(_opt('occlusion_fill', self.occlusion_fill))
+            self.floor_board.setChecked(bool(options.get('floor_board')))
+            self.auto_floor.setChecked(_opt('auto_floor', self.auto_floor));self.floor_height.setValue(_opt('floor', self.floor_height))
+            self.pelvis_offset.setValue(_opt('pelvis_offset', self.pelvis_offset))
         finally:
             for control in controls:control.blockSignals(False)
         self.update_correction_description()
 
     def correction_settings_changed(self, *_):
-        if self.sender() is self.floor_height and self.auto_floor.isChecked():return
+        if self.sender() is self.floor_height and self.auto_floor.isChecked():
+            # A person-entered height replaces the automatic estimate.
+            self.auto_floor.blockSignals(True);self.auto_floor.setChecked(False);self.auto_floor.blockSignals(False)
         self.update_correction_description()
         self.save_correction_options()
         if self.sender() is self.correction_preset:
@@ -1206,6 +2830,9 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
     def start_jobs(self, jobs, refresh_characters=False):
         if self.busy:
             return
+        # A reconstruction needs the whole GPU; the waiting live worker gives
+        # it back and is preloaded again when a live source next opens.
+        self.stop_preloaded_worker()
         jobs=list(jobs)
         from .resource_safety import message
         self._job_resource_safety=self.resource_safety.isChecked()
@@ -1316,6 +2943,11 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
             person_batch=self._people_batch
             completion_message=self.status.text()
             self.finish_people_jobs()
+            # A finished reconstruction of a lone actor gets one grounding check.
+            if getattr(self,'_ground_after_single_batch',False):
+                self._ground_after_single_batch=False
+                if not self.failed and not self.cancelled:
+                    QTimer.singleShot(0,self.ground_lone_actor_after_reconstruction)
             if self.failed or self.cancelled:self.status.setText(completion_message)
             if not self.failed and not self.cancelled:
                 if self.current_stage in ("export",'flow_export') and self.project is not None and not person_batch:
@@ -1341,6 +2973,21 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
                     self.log.append(f'Total motion processing time: {elapsed:.2f} s')
             self.refresh_results()
             self.update_readiness()
+            if getattr(self, '_auto_play', False):
+                self._auto_play = False
+                if not self.failed and not self.cancelled:
+                    self.slider.setValue(self.slider.clip_in)
+                    self.toggle_play()
+                    resume = getattr(self, '_live_resume_info', None)
+                    if resume is not None:
+                        self._live_resume_info = None
+                        device, cw, ch, fps, preview_width, rotation = resume
+                        from . import camera_capture
+                        session = camera_capture.Session(
+                            camera_capture.default_path(ROOT), device, cw, ch, fps,
+                            preview_width=preview_width, rotation=rotation)
+                        session.start_preview()
+                        self.start_live_camera(session)
             if self.failed or self.cancelled:
                 self.character_refresh_queue=[]
             else:
@@ -1489,6 +3136,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
                 atomic_json(saved_root/'workspace_state.json',dict(version=1,name=saved_root.name,
                     active=self.project.resolve().relative_to(saved_root).as_posix(),frame=0,trim=None))
             self.load_project(self.project)
+            self.trim_live_snapshot_to_person()
         elif kind == 'project_saved':
             self._project_saved_root=Path(event['root'])
         elif kind == 'save_cancelled':
@@ -1505,7 +3153,10 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         elif kind == "diagnostics":
             data = event["result"]
             self.log.append(json.dumps(data, ensure_ascii=False, indent=2))
-            self.hardware_summary = f"{data.get('gpu', 'GPU unavailable')} · RAM {data.get('ram_gib', '?')}GB · CUDA check {'Passed' if data.get('cuda_matmul_verified') else 'Unavailable'}"
+            support = data.get('support') or {}
+            verdict = {'unsupported': ' · GPU not supported, see Console',
+                       'warning': ' · GPU limited, see Console'}.get(support.get('status'), '')
+            self.hardware_summary = f"{data.get('gpu', 'GPU unavailable')} · RAM {data.get('ram_gib', '?')}GB · CUDA check {'Passed' if data.get('cuda_matmul_verified') else 'Unavailable'}" + verdict
             self.status.setText(self.hardware_summary)
         elif kind in {"failed", "blocked"}:
             self.failed = True
@@ -1593,6 +3244,46 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
                 worker.kill()
         self.status.setText("Cancelled. Completed stages will be reused next time.")
 
+    def trim_live_snapshot_to_person(self):
+        """A live snapshot holds the waiting time before the person walked in,
+        and a body model invents motion for every frame it is given: clip the
+        working range to where the tracker actually saw the person, so the
+        reconstruction covers only real footage."""
+        snapshot = getattr(self, '_live_snapshot', None)
+        self._live_snapshot = None
+        if snapshot is None or self.project is None:
+            return
+        import numpy as _np
+        state = None
+        try:
+            from .people_store import load_people, root_for
+            manifest = json.loads((self.project / 'project.json').read_text(encoding='utf-8'))
+            root = root_for(self.project, manifest)
+            state = load_people(root)
+        except (OSError, ValueError, KeyError):
+            return
+        if not state or not state.get('people'):
+            return
+        person = next((p for p in state['people'] if p['id'] == state.get('active')), state['people'][0])
+        track = root / person['preview'] / 'tracking.npz'
+        if not track.is_file():
+            return
+        try:
+            with _np.load(track, allow_pickle=False) as data:
+                observed = data['observed']
+        except (OSError, ValueError, KeyError):
+            return
+        if not observed.any():
+            return
+        first = int(observed.argmax())
+        end = min(len(observed), int(len(observed) - observed[::-1].argmax()) + 1)
+        if end - first < 4:
+            return
+        self.slider.set_clip(first, end)
+        self.clip_changed(self.slider.clip_in, self.slider.clip_out)
+        self.status.setText(f'Person found in frames {first + 1}-{end}. '
+                            f'The range is clipped to the footage with the person in it.')
+
     def refresh_results(self):
         if self.project:
             signature = project_signature(self.project)
@@ -1608,6 +3299,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.data_loader.cancel()
         self.preview_signature = None
         self.slider.has_motion = False
+        self.slider.set_observed(None)
+        self.motion_view.observed_spans = None
         self.slider.update()
         self.video_view.set_observations({})
         self.motion_view.set_motion(None)
@@ -1631,7 +3324,11 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
             self.preview_signature=None
             self.refresh_results()
             return
-        self.video_view.set_observations({})
+        # Keep the current overlay while the same project reloads (a finished
+        # stage, a correction) so the box and its points never blink out; a
+        # different project must not inherit them.
+        if self.preview_data is None or self.preview_data.project != result.project:
+            self.video_view.set_observations({})
         previous=self.preview_data
         preserve_view=previous is not None and previous.project==result.project
         auto_fit=self.motion_view.auto_fit
@@ -1653,6 +3350,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
             # Hide stale payloads without forgetting this project's camera
             # anchor while the next committed correction is loading.
             self.motion_view.set_motion(None,path=data.project/(self.active_result+'_joints.npz'))
+            self.motion_view.observed_spans=None
+            self.slider.set_observed(None)
             self.slider.has_motion=False;self.slider.update()
             if not self.busy and signature!=self.preview_signature:self.refresh_results()
             return
@@ -1667,13 +3366,22 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         available = name in data.arrays and (current or pending)
         self.correction_note.hide()
         self.refine_preview_note.hide()
+        # A selected variant that was never computed (HandFlow before its
+        # inference, or a correction that was never applied) must not blank the
+        # viewport. Keep showing the closest available preview of the same stack
+        # and state in the note which motion is displayed instead.
+        fallback_note=''
         if not available:
-            result = {"initial":MOTION_TOOLS[self.model_choice.currentData()].label, "refined":"HTD", "footmr_initial":"FootMR", "footmr_refined":"HTD + FootMR"}[body_result(self.active_result)]
-            if has_handflow(self.active_result):result += " + HandFlow"
+            fallback_note=self.unavailable_result_note(display_kind)
+            for candidate in self.preview_display_fallbacks(display_kind):
+                if (candidate+'_joints' in data.arrays and artifacts_current(self.project,candidate)
+                        and result_is_current(self.project,candidate)):
+                    display_kind=candidate;name=display_kind+'_joints'
+                    corrected=display_kind.startswith('corrected_');available=True
+                    break
+        if not available:
             note=self.correction_note if corrected else self.refine_preview_note
-            missing_hand=has_handflow(self.active_result) and not result_is_current(self.project,base_result(self.active_result))
-            note.setText('No current HandFlow preview. Run Reconstruct 3D to infer finger motion.' if missing_hand else
-                'Correction settings changed or result unavailable.\nUse Apply Correction to update the preview.' if corrected else f"No {result} preview yet. Run Reconstruct 3D to create it.")
+            note.setText(fallback_note)
             note.show()
         warning=' '.join(filter(None,(data.summaries.get(name,{}).get('correction_warning',''),data.summaries.get(name,{}).get('handflow_warning',''))))
         pelvis_summary=data.summaries.get(name,{})
@@ -1693,12 +3401,14 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         if available and pending:
             self.correction_note.setText('Contact-lock timing changed. Preview shows the last applied correction.\nApply Correction to update the motion and FBX.');self.correction_note.show()
         self.slider.has_motion = available
+        self.slider.set_observed(getattr(data,'observed_spans',None))
+        self.motion_view.observed_spans=getattr(data,'observed_spans',None)
         self.slider.update()
-        overlay_name=self.active_result+'_joints'
-        overlay_current=artifacts_current(self.project,self.active_result) and result_is_current(self.project,self.active_result,ignore_contacts=True)
+        overlay_name=display_kind+'_joints'
+        overlay_current=artifacts_current(self.project,display_kind) and result_is_current(self.project,display_kind,ignore_contacts=True)
         overlay_available=overlay_current and overlay_name in data.arrays
         from .bone_overlay import preview_current
-        target_current=overlay_available and preview_current(self.project,self.active_result,data.target_info.get(self.active_result))
+        target_current=overlay_available and preview_current(self.project,display_kind,data.target_info.get(display_kind))
         camera_name=name if available else overlay_name
         rig_points=data.arrays.get(camera_name)
         # Source pose is the comparison reference. Never deform this surface
@@ -1710,17 +3420,17 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
                                    data.summaries.get(camera_name),data.project/(camera_name+'.npz'),
                                    rotations=data.arrays.get(camera_name.replace('_joints','_rotations')) if available or overlay_available else None,
                                    mesh_frames=(selected_mesh if selected_mesh is not None else data.arrays.get(name.replace('_joints','_mesh'))) if available else None,mesh_asset=data.mesh_asset)
-        self.motion_view.target_frames=data.arrays.get(self.active_result+'_rig') if target_current else None
-        self.motion_view.target_asset=data.target_assets.get(self.active_result) if target_current else None
+        self.motion_view.target_frames=data.arrays.get(display_kind+'_rig') if target_current else None
+        self.motion_view.target_asset=data.target_assets.get(display_kind) if target_current else None
         self.motion_view.mesh_binding=self.motion_view.target_asset.get('binding') if selected_mesh is not None and self.motion_view.target_asset else None
         self.motion_view.raw_asset=None
         self.motion_view.native_vertices=None
         self.motion_view.native_required=False
         if self.model_choice.currentData()=='flowhmr':
             self.motion_view.raw_asset=self.motion_view.target_asset
-            self.motion_view.native_vertices=data.arrays.get(self.active_result+'_native') if target_current else None
+            self.motion_view.native_vertices=data.arrays.get(display_kind+'_native') if target_current else None
             self.motion_view.native_required=True
-        info=data.target_info.get(self.active_result,{})
+        info=data.target_info.get(display_kind,{})
         warning=info.get('correction',{}).get('warning','')
         source_warning=data.summaries.get(name,{}).get('correction_warning','') if corrected else ''
         if source_warning and source_warning not in warning:warning=' '.join(filter(None,(warning,source_warning)))
@@ -1731,6 +3441,9 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
             short=int(pelvis_summary.get('short_contact_segments',0))
             if short:help_text+=f'\n{short} short foot-lock intervals never reach full strength because of boundary blending.'
         notices=[]
+        if fallback_note:notices.append(fallback_note)
+        if available and pelvis_summary.get('occlusion_frames'):
+            notices.append(f"{pelvis_summary['occlusion_frames']} frames where the person was not detected were re-estimated from the motion on both sides.")
         if not available and corrected:notices.append('Selected motion unavailable. Use Apply Correction to update the preview.')
         if warning:notices.append(warning)
         selected_fit=info.get('selected_source_fit',{})
@@ -1752,11 +3465,11 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.bone_overlay.setToolTip(tooltip_text('Show the skeleton used for FBX export. Display only.\n'
             'In Blender, use Scale 1 and leave Automatic Bone Orientation off to keep its axes.\n'+help_text))
         if available and pending:notices.append('Contact-lock timing changed. Preview shows the last applied correction. Apply Correction to update the motion and FBX.')
-        if corrected and available and not pending and not result_is_current(self.project,self.active_result):notices.append('The last applied correction is outdated or unavailable. Apply Correction before export.')
+        if corrected and available and not pending and not fallback_note and not result_is_current(self.project,self.active_result):notices.append('The last applied correction is outdated or unavailable. Apply Correction before export.')
         self.preview_help.setText(help_text)
         self.correction_note.setText('\n'.join(dict.fromkeys(notices)));self.correction_note.setVisible(bool(notices))
-        if available and self.motion_view.target_asset is None and not self.busy and os.environ.get('QT_QPA_PLATFORM')!='offscreen' and (self.project/RESULTS[base_result(self.active_result)][0]).is_file():
-            token=(str(self.project),self.active_result,self.preview_signature)
+        if available and self.motion_view.target_asset is None and not self.busy and os.environ.get('QT_QPA_PLATFORM')!='offscreen' and (self.project/RESULTS[base_result(display_kind)][0]).is_file():
+            token=(str(self.project),display_kind,self.preview_signature)
             attempts=getattr(self,'_rig_attempts',deque(maxlen=16))
             if token not in attempts:
                 attempts.append(token);self._rig_attempts=attempts
@@ -1858,13 +3571,21 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         if urls and not self.busy:
             if self._pear_active:self.load_pear_videos([Path(url.toLocalFile()) for url in urls])
             elif self.model_choice.currentData()=='mamma':self.load_mamma_videos([Path(url.toLocalFile()) for url in urls])
-            else:self.load_video(Path(urls[0].toLocalFile()))
+            else:
+                local = urls[0].toLocalFile()
+                if local:
+                    self.load_video(Path(local))
+                else:
+                    from .video_url import is_url
+                    if is_url(urls[0].toString()):
+                        self.choose_video_url(urls[0].toString())
 
     def closeEvent(self, event):
         if getattr(self, '_preview_export', None) is not None:
             self._preview_export.cancel(close_window=True)
             event.ignore()
             return
+        self.stop_preloaded_worker()
         if self.busy and self.process:
             answer = QMessageBox.question(self, "Processing", "Cancel the current job and close the application?")
             if answer != QMessageBox.Yes:
@@ -1878,7 +3599,25 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.pear_stop_scan()
         if self.character_process is not None:
             self.cancel_character();self.character_process.waitForFinished(5000)
+        if getattr(self, 'live_channel', None) is not None:
+            self.stop_live_body()
+        source_fetch = getattr(self, 'source_fetch', None)
+        if source_fetch is not None:
+            # A download still running must not be destroyed under its thread.
+            source_fetch.stopping = True
+            source_fetch.wait(10000)
+            self.close_source_fetch()
+        if getattr(self, 'live_link', None) is not None:
+            self.live_link.stop()
+        if getattr(self, 'cascadeur_link', None) is not None:
+            self.cascadeur_link.stop()
+            try:
+                self.cascadeur_link.disconnect(wait=1.0)
+            except Exception:
+                pass
         self.character_loader.close()
+        if getattr(self, 'camera_check', None) is not None:
+            self.camera_check.close()
         self.task_timer.stop()
         if self.workspace_root is not None:
             try:self.remember_workspace_model()

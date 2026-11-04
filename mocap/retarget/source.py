@@ -10,13 +10,38 @@ def stamp(paths):
     return {str(p):[p.stat().st_size,p.stat().st_mtime_ns] for p in paths}
 
 
+def support_heights(project,kind,weights,n):
+    """Lowest sole height per frame, sampled from the registered surface in chunks."""
+    from mocap.project_storage import resolve_reference
+    project=Path(project);mi=json.loads((project/(kind+'_mesh.json')).read_text(encoding='utf8'))
+    with np.load(resolve_reference(project,mi['asset'])) as asset:
+        count=int(asset['vertex_count']);packed=asset['packed']
+    ids=[np.flatnonzero(weights[:,[7+s,10+s]].sum(1)>.7) for s in (0,1)]
+    use=np.unique(np.concatenate(ids));pick=[np.searchsorted(use,ids[s]) for s in (0,1)]
+    template=packed[:count*3].reshape(count,3)[use].astype(float)
+    shapes=packed[count*3:count*63].reshape(20,count,3)[:,use].astype(float)
+    poses=packed[count*63:count*1521].reshape(486,count,3)[:,use].astype(float)
+    skinning=packed[count*1521:].reshape(count,55)[use].astype(float)
+    frames=np.load(project/mi['frames_file'],mmap_mode='r',allow_pickle=False)
+    heights=np.empty((n,2))
+    try:
+        for a in range(0,n,128):
+            f=np.asarray(frames[a:min(n,a+128)],float)
+            posed=template+np.einsum('tb,bvc->tvc',f[:,1366:1386],shapes)+np.einsum('tp,pvc->tvc',f[:,880:1366],poses)
+            transform=np.einsum('vj,tjk->tvk',skinning,f[:,:880].reshape(-1,55,16)).reshape(-1,len(use),4,4)
+            vertices=np.einsum('tvij,tvj->tvi',transform[:,:,:3,:3],posed)+transform[:,:,:3,3]+f[:,-3:,None].transpose(0,2,1)
+            for s in (0,1):heights[a:a+len(f),s]=vertices[:,pick[s],1].min(1)
+    finally:
+        frames._mmap.close()
+    return heights
+
+
 def prepare(project,kind,out):
     import torch
     from mocap.paths import MODELS
     from mocap.motion_tools import RESULTS
     from mocap.project_storage import resolve_reference
     from mocap.source_surface import native_endpoints,smplx_endpoints
-    from mocap.mesh_data import reference_vertices
     from . import surface
     from mocap.surface_roll import confidence_solve
     from mocap.bone_overlay import reference_frame
@@ -78,22 +103,21 @@ def prepare(project,kind,out):
     settings=json.loads(correction.read_text(encoding='utf8')) if correction.exists() else {}
     floor=float(settings.get('floor',0.));origin=points[0,0].copy();origin[1]=floor
     # Registered surface evidence is independent of world translation.
-    heights=np.empty((n,2))
+    # Surface support heights are only consumed by multi-level correction.
+    level=settings.get('mode',settings.get('correction_mode'))=='multi_level'
+    heights=None
     if topology=='smplh':
         raw=np.load(project/info['raw_file'],mmap_mode='r')
         ep=native_endpoints(raw)
-        for s in [0,1]:
-            ids=np.flatnonzero(weights[:,[7+s,10+s]].sum(1)>.7)
-            for a in range(0,n,128):heights[a:a+128,s]=raw[a:a+128,ids,1].min(1)
+        if level:
+            heights=np.empty((n,2))
+            for s in [0,1]:
+                ids=np.flatnonzero(weights[:,[7+s,10+s]].sum(1)>.7)
+                for a in range(0,n,128):heights[a:a+128,s]=raw[a:a+128,ids,1].min(1)
         raw._mmap.close()
     else:
         ep,_=smplx_endpoints(project,kind,n)
-        mi=json.loads((project/(kind+'_mesh.json')).read_text(encoding='utf-8'));ma=np.load(resolve_reference(project,mi['asset']));mf=np.load(project/mi['frames_file'],mmap_mode='r')
-        ids=[np.flatnonzero(weights[:,[7+s,10+s]].sum(1)>.7) for s in [0,1]]
-        for i in range(n):
-            v=reference_vertices(ma['packed'],mf[i],int(ma['vertex_count']))
-            for s in [0,1]:heights[i,s]=v[ids[s],1].min()
-        mf._mmap.close();ma.close()
+        if level:heights=support_heights(project,kind,weights,n)
     points-=origin
     fitted=confidence_solve(points,native,neutral[:22],ep,fps)[0]
     ep0=surface.endpoints(vertices,topology)[None]

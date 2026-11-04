@@ -161,6 +161,18 @@ for _key, _file in SAM_MANUAL_FILES.items():
     MANUAL_DETAILS[_key] = dict(selection='facebook/sam-3d-body-dinov3 > ' + _file,
         location=_file,avoid='SAM image segmentation, SAM 3D Objects, standalone DINOv3 weights, or files from a different revision. Import each of the three supported SAM files in its own matching row.')
 
+
+# Files hosted by the Max Planck download server behind a free registration.
+# Each maps to (site, archive or file on the server). One archive can fill several rows.
+PROVIDER_FILES = {
+    'smpl': ('smpl', 'SMPL_python_v.1.1.0.zip'),
+    'smplx': ('smplx', 'models_smplx_v1_1.zip'),
+    'mamma': ('mamma', 'weights/mamma_mask_full_cvpr.ckpt'),
+    'mamma_body': ('smplx', 'smplx_lockedhead_20230207.zip'),
+    'mamma_body_male': ('smplx', 'smplx_lockedhead_20230207.zip'),
+    'mamma_body_female': ('smplx', 'smplx_lockedhead_20230207.zip'),
+}
+
 def manual_download_page(key: str) -> str:
     model = BY_KEY[key]
     body_pages = {'smplx':'https://smpl-x.is.tue.mpg.de/download.php',
@@ -215,6 +227,10 @@ def manual_instructions_html(key: str) -> str:
                       model.url + '/blob/' + SAM_REV + '/' + SAM_MANUAL_FILES[key]))
     details = MANUAL_DETAILS.get(key, {})
     body = '<p><b>File to import:</b> <code>' + escape(model.path.name) + '</code></p>'
+    body += ('<p><b>This app registers the file at:</b><br/><code>' + escape(str(model.path)) +
+        '</code></p><p>Download the file anywhere, then click <b>Import</b> in this row: the app checks '
+        'it and registers it there. Files that need provider registration (body and hand models, '
+        'FlowHMR, SAM and ExMR files) are only accepted through Import, even if copied into that folder.</p>')
     if details.get('selection'):
         body += '<p><b>Choose on the website:</b><br/>' + escape(details['selection']) + '</p>'
     body += '<p><b>Steps</b><br/>' + escape(instructions).replace('\n', '<br/>') + '</p>'

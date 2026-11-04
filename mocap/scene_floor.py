@@ -25,7 +25,7 @@ def scene_root(project,manifest=None):
 def floor_options(options):
     from .correction_settings import correction_options
     mode=correction_options(options)['mode']
-    auto=bool(options.get('auto_floor',True))
+    auto=bool(options.get('auto_floor',False))
     value=0. if auto else float(options.get('floor',0.))
     if not math.isfinite(value):raise ValueError('Shared floor height must be finite')
     # Preserve legacy flat-plane receipt signatures.
@@ -124,8 +124,19 @@ def resolve(root,body=None):
         from .flow_floor import resolve
         return resolve(root,options)
     mamma=read_people_json(root/'project.json').get('pipeline',{}).get('model')=='mamma'
-    context=inputs(root);height=options['floor'];samples=0;warning=''
-    if options['auto_floor']:
+    context=inputs(root);height=options['floor'];samples=0;warning='';board=None
+    method='One common plane; equal-actor median of original motion sole estimates'
+    if options.get('floor_board'):
+        # A printed sheet is a measurement: the floor and the camera height above
+        # it come from one rigid fit instead of from inferred foot contacts.
+        from .floor_board import scene_floor as measure
+        measured,board=measure(root,context)
+        if measured is None:
+            warning='No readable floor reference board in the scene video; the floor was inferred from foot contacts.'
+        else:
+            height=float(measured)
+            method='One common plane measured from the floor reference board in the scene video'
+    if options['auto_floor'] and board is None:
         import numpy as np
         import torch
         from scipy.spatial.transform import Rotation
@@ -171,7 +182,8 @@ def resolve(root,body=None):
         if not estimates:warning='No reliable ground samples. Shared reference floor 0 m is used; adjust it manually if needed.'
     if inputs(root)!=context or read_config(root)!=options:raise ValueError('Shared floor inputs changed; Apply Correction again.')
     record=dict(version=VERSION,options=options,inputs=context,floor=float(height),samples=samples,warning=warning,
-        signature=signature(options,context,height),method='One common plane; equal-actor median of original motion sole estimates')
+        signature=signature(options,context,height),method=method)
+    if board is not None:record['floor_board']=board
     atomic_json(root/'scene_floor_resolved.json',record)
     return record
 

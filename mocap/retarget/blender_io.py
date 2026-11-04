@@ -1,7 +1,11 @@
 """Known humanoid import and compact, bone-driven viewport data."""
 import json
+import os
+import shutil
 import sys
 import struct
+import tempfile
+import uuid
 from pathlib import Path
 import numpy as np
 import bpy
@@ -16,7 +20,8 @@ def report(message):
 
 def import_character(filename, out):
     Path(io_path(out)).mkdir(parents=True,exist_ok=True)
-    kind={'.fbx':'mixamo','.vrm':'vrm','.pmx':'pmx'}[filename.suffix.lower()]
+    kind={'.fbx':'mixamo','.glb':'glb','.gltf':'glb','.vrm':'vrm','.pmx':'pmx'}.get(filename.suffix.lower())
+    if kind is None:raise ValueError('Unsupported character format. Import FBX, GLB/glTF, VRM or PMX.')
     bpy.ops.wm.read_factory_settings(use_empty=True)
     addons=Path(__file__).resolve().parents[2]/'third_party/character_import'
     sys.path.insert(0,str(addons))
@@ -24,6 +29,10 @@ def import_character(filename, out):
     report('Importing '+filename.name)
     if kind=='mixamo':
         bpy.ops.import_scene.fbx(filepath=str(filename),automatic_bone_orientation=False,use_prepost_rot=True)
+    elif kind=='glb':
+        # Blender's bundled glTF importer keeps joint names, so the humanoid
+        # mapping can match them without a manual bone map.
+        bpy.ops.import_scene.gltf(filepath=str(filename))
     elif kind=='vrm':
         addon_utils.enable('io_scene_vrm',default_set=True,persistent=False)
         bpy.ops.import_scene.vrm(filepath=str(filename))
@@ -58,6 +67,8 @@ def import_character(filename, out):
                 if mod.type=='NODES':mod.show_viewport=False;mod.show_render=False
     for pb in arm.pose.bones:pb.matrix_basis.identity()
     bpy.context.view_layer.update()
+    if not any(o.type=='MESH' for o in bpy.context.scene.objects):
+        raise ValueError('This file has a skeleton but no mesh. Download the character from Mixamo with Skin (FBX, With Skin) and import that file.')
     # Place the native rest shape at the scene origin, without scaling its bones.
     from mathutils import Vector
     hip=arm.matrix_world@arm.data.bones[mapping[0]].head_local
@@ -80,15 +91,65 @@ def import_character(filename, out):
     from .blender_geometry import register
     report('Registering soles, palms and humanoid proportions')
     register(out,kind,rig,arm,mapping,rest)
-    bpy.ops.file.pack_all()
+    # A file imported from another machine may reference textures that no
+    # longer exist; those materials fall back to their base color.
+    try:bpy.ops.file.pack_all()
+    except RuntimeError:report('Some original textures are missing; their materials use base colors')
     save_blend(out/f'{kind}-rest.blend')
     preview(out,arm,None,1)
+    # The live view poses this character directly; a failure here only means
+    # the rig is prepared on first live use instead.
+    try:write_live_rig(out,kind,arm,mapping)
+    except Exception as error:report('Live rig skipped: '+str(error)[:120])
     metadata=dict(kind=kind,name=filename.stem,vertices=count,bones=len(arm.data.bones))
     if kind=='pmx':metadata['mmd_import_scale']=.08
     Path(io_path(out/'import.json')).write_text(json.dumps(metadata),encoding='utf8')
     from .blender_textures import extract
     report('Preparing original-resolution textures')
     extract(out)
+
+
+PMX_DEFORM = (('足D', 1), ('ひざD', 4), ('足首D', 7), ('足先EX', 10))
+
+
+def write_live_rig(out, kind, arm, mapping):
+    """Rest bone data for the live retarget: one file, no animation, no keys.
+
+    The live view poses the character from numpy every frame, so it only needs
+    where each palette bone sits at rest and which of the 22 body joints drives
+    it. Palette order is the rest preview's (sorted bone names), so a pose built
+    from this file skins ``preview.npz`` directly.
+    """
+    for pb in arm.pose.bones:
+        pb.matrix_basis.identity()
+    bpy.context.view_layer.update()
+    palette = sorted(b.name for b in arm.data.bones)
+    index = {name: i for i, name in enumerate(palette)}
+    joint_of = {name: j for j, name in enumerate(mapping)}
+    if kind == 'pmx':
+        for side, suffix in enumerate(('.L', '.R')):
+            for stem, joint in PMX_DEFORM:
+                joint_of[stem + suffix] = joint + side
+    head = np.array([arm.matrix_world @ arm.data.bones[n].head_local for n in palette]) @ A
+    tail = np.array([arm.matrix_world @ arm.data.bones[n].tail_local for n in palette]) @ A
+    parents = np.array([index[arm.data.bones[n].parent.name] if arm.data.bones[n].parent else -1 for n in palette], np.int32)
+    joints = np.array([joint_of.get(n, -1) for n in palette], np.int32)
+    canonical = np.load(io_path(out / (kind + '-canonical.npz')))
+    np.savez(io_path(out / 'live-rig.npz'), names=np.asarray(palette), parents=parents, head=head,
+             joints=joints, canonical_rest=canonical['rest'], tail=tail, version=np.int32(2))
+
+
+def live_rig(out):
+    """Add live-rig.npz to a character imported before the live retarget existed."""
+    out = Path(out)
+    kind = json.loads(Path(io_path(out / 'import.json')).read_text(encoding='utf8'))['kind']
+    bpy.ops.wm.open_mainfile(filepath=io_path(out / (kind + '-rest.blend')), load_ui=False)
+    rig = json.loads(Path(io_path(out / (kind + '-rig.json'))).read_text(encoding='utf8'))
+    arm = bpy.data.objects[rig['armature']]
+    arm.animation_data_clear()
+    mapping = np.load(io_path(out / (kind + '-canonical.npz')))['names'].tolist()
+    write_live_rig(out, kind, arm, mapping)
+    report('Live rig ready')
 
 
 def vertex_colors(obj):
@@ -113,7 +174,8 @@ def vertex_colors(obj):
                 node=next((n for n in nodes if n.type=='TEX_IMAGE' and n.image and ('shade' not in n.name.lower())),None)
                 if node:tex=node.image
         pixels=None
-        if tex and tex.size[0]*tex.size[1]<=16_777_216:
+        # A texture whose file is missing has zero size; use the material color.
+        if tex and tex.size[0] and tex.size[1] and tex.size[0]*tex.size[1]<=16_777_216:
             pixels=np.empty(tex.size[0]*tex.size[1]*4,np.float32)
             tex.pixels.foreach_get(pixels);pixels=pixels.reshape(tex.size[1],tex.size[0],4)
         materials.append((col,pixels))
@@ -175,12 +237,43 @@ def preview(out,arm,keyed,n):
     frames.flush();del frames
 
 
+def export_glb(target):
+    """Write the selected armature and meshes as one glTF binary file.
+
+    glTF keeps the armature's rest joints as node transforms and stores the baked
+    motion as sampled animation channels, with no armature-object keys, mirroring
+    the FBX path. All bones are exported as joints, so terminal finger bones do
+    not need the FBX leaf-bone workaround.
+
+    Blender's glTF exporter derives its output folder from the file path and
+    rejects the Windows extended prefix, so the file is written to a short
+    temporary folder and published to the (possibly long) destination after.
+    """
+    with tempfile.TemporaryDirectory(prefix='rgbmocap-glb-') as stage:
+        staged=Path(stage)/'character.glb'
+        bpy.ops.export_scene.gltf(
+            filepath=str(staged),export_format='GLB',use_selection=True,export_apply=True,
+            export_animations=True,export_animation_mode='ACTIVE_ACTIONS',export_anim_single_armature=True,
+            export_force_sampling=True,export_frame_range=True,export_anim_slide_to_zero=True,
+            export_optimize_animation_size=False,export_reset_pose_bones=True,
+            export_rest_position_armature=True,export_leaf_bone=False,export_def_bones=False,
+            export_skins=True,export_yup=True,export_materials='EXPORT',
+            export_cameras=False,export_lights=False,export_extras=False)
+        pending=Path(io_path(str(target)+'.'+uuid.uuid4().hex+'.partial'))
+        try:
+            shutil.copyfile(staged,pending)
+            os.replace(pending,io_path(target))
+        finally:
+            pending.unlink(missing_ok=True)
+
+
 def main(args):
     mode,folder,*rest=args;out=Path(folder)
     if mode=='import':import_character(Path(rest[0]),out)
+    elif mode=='liverig':live_rig(out)
     elif mode=='textures':
         kind=json.loads(Path(io_path(out/'import.json')).read_text(encoding='utf8'))['kind']
-        if kind not in {'mixamo','vrm','pmx'}:raise ValueError('Unsupported character kind')
+        if kind not in {'mixamo','glb','vrm','pmx'}:raise ValueError('Unsupported character kind')
         bpy.ops.wm.open_mainfile(filepath=io_path(out/f'{kind}-rest.blend'),load_ui=False)
         from .blender_textures import extract
         extract(out)
@@ -198,7 +291,7 @@ def main(args):
         folder=Path(rest[0]);target=Path(rest[1]);transform=json.loads(rest[2])
         options=json.loads(rest[4]) if len(rest)>4 else {}
         fmt=options.get('format','fbx')
-        if fmt not in {'fbx','vmd'}:raise ValueError('Unsupported character export format')
+        if fmt not in {'fbx','glb','vmd'}:raise ValueError('Unsupported character export format')
         kind=json.loads(Path(io_path(folder/'import.json')).read_text(encoding='utf8'))['kind']
         if fmt=='vmd':
             if kind!='pmx':raise ValueError('VMD export requires a PMX character')
@@ -220,6 +313,9 @@ def main(args):
         for obj in bpy.context.scene.objects:
             if obj.type in types:obj.select_set(True)
         bpy.context.view_layer.objects.active=arm
+        if fmt=='glb':
+            export_glb(target)
+            return
         temp=target.with_name('.'+target.stem+'-'+uuid.uuid4().hex+'.partial.fbx')
         try:
             with body_only_sampler(arm,set(info['keyed_bones'])|body_dependencies(kind,arm)):

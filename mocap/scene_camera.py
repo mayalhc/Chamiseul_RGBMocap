@@ -71,6 +71,35 @@ def paired_camera(world_rotation,cam_rotation,world_translation,cam_translation,
     return validate_transform(result)
 
 
+def take_camera(project):
+    """world->camera transform and intrinsics for one take.
+
+    Mirrors the per-take branch of prepare_cameras so a lone project can place a
+    measured floor in its own motion world without building a whole people scene.
+    """
+    import torch
+    from scipy.spatial.transform import Rotation
+    from .paths import MODELS
+    project=Path(project)
+    record=torch.load(project/'hmr4d_results.pt',map_location='cpu',weights_only=False,mmap=True)
+    world,incam=record['smpl_params_global'],record['smpl_params_incam']
+    model=MODELS/('body_models/smplh/neutral/model.npz' if record.get('source_model')=='flowhmr' else 'body_models/smplx/SMPLX_NEUTRAL.npz')
+    if not model.exists():raise FileNotFoundError('Import the body model to place a measured floor.')
+    with np.load(model,allow_pickle=False) as data:
+        regressor=data['J_regressor'][0]
+        pelvis=regressor@data['v_template']+np.einsum('v,vci->ci',regressor,data['shapedirs'][...,:10])@world['betas'][0].numpy()
+    rotation=lambda params:Rotation.from_rotvec(params['global_orient'][0].numpy()).as_matrix()
+    transform=paired_camera(rotation(world),rotation(incam),world['transl'][0].numpy(),incam['transl'][0].numpy(),pelvis)
+    if record.get('source_model')=='exmr':
+        shared=json.loads((project/'exmr_camera_sources.json').read_text(encoding='utf-8'))
+        align=np.asarray(shared['reference_rotation'])@np.asarray(shared['first_rotation']).T
+        transform[:3,:3]=align@transform[:3,:3]
+        transform[:3,3]=align@transform[:3,3]
+        validate_transform(transform)
+    with np.load(project/'tracking.npz',allow_pickle=False) as tracking:K=tracking['K'].tolist()
+    return transform,K
+
+
 def take_projects(root,state):
     rows=[]
     for person in state['people']:

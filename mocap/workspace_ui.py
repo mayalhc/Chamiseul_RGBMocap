@@ -4,8 +4,9 @@ from .console_log import ConsoleLog
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QWidget, QFrame, QLabel, QPushButton, QComboBox, QCheckBox,
-    QVBoxLayout, QHBoxLayout, QGroupBox, QSplitter,
-    QSpinBox, QDoubleSpinBox, QProgressBar, QTextEdit, QMessageBox, QSizePolicy, QStackedWidget)
+    QVBoxLayout, QHBoxLayout, QGroupBox, QSplitter, QScrollArea,
+    QSpinBox, QDoubleSpinBox, QProgressBar, QTextEdit, QMessageBox, QSizePolicy, QStackedWidget,
+    QSlider)
 from .viewer import VideoView, MotionView
 from .timeline import TimelineSlider
 from .motion_tools import MOTION_TOOLS
@@ -121,6 +122,14 @@ def build_workspace(w):
     w.filename.setMinimumWidth(0)
     w.filename.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
     top.addWidget(w.filename, 1)
+    # A previewed link is streamed, never saved. This keeps it once for the
+    # stages that re-read the whole clip. Disabled until a link is previewed so
+    # it never suggests a download for a local video.
+    w.source_download = QPushButton('Download')
+    w.source_download.setEnabled(False)
+    w.source_download.setToolTip(tooltip_text('Save the link previewed from File > Open Video from URL into the downloads folder and open it as a video.\nReconstruct 3D re-reads the clip several times, so it needs the file; the live preview does not.'))
+    w.source_download.clicked.connect(w.download_source)
+    top.addWidget(w.source_download)
     root.addLayout(top)
 
     main = QSplitter(Qt.Horizontal)
@@ -136,12 +145,47 @@ def build_workspace(w):
     w.video_view.metadata_ready.connect(w.video_ready)
     w.video_view.decode_error.connect(w.video_failed)
     video_panel, video_header = editor("Movie Clip", w.build_people_editor(w.video_view))
+    # Playback controls for a link preview only: a stream cannot be scrubbed in
+    # place, so the slider reopens it at the chosen second. A camera and a local
+    # clip have their own transport, so this strip stays hidden for them.
+    w.link_playback = QWidget()
+    link_bar = QHBoxLayout(w.link_playback)
+    link_bar.setContentsMargins(0, 0, 0, 0)
+    link_bar.setSpacing(6)
+    w.link_loop = QCheckBox('Loop')
+    w.link_loop.setChecked(True)
+    w.link_loop.setToolTip(tooltip_text('Play the link again when it reaches its end, so the character keeps moving while its model loads. Off leaves the character on the last frame.'))
+    w.link_loop.toggled.connect(w.set_link_loop)
+    link_bar.addWidget(w.link_loop)
+    w.link_position = QSlider(Qt.Horizontal)
+    w.link_position.setRange(0, 1000)
+    w.link_position.setFixedWidth(120)
+    w.link_position.setToolTip(tooltip_text('Where in the link the preview is playing. A stream cannot be scrubbed in place, so releasing the slider reopens it at that second. Disabled when the link has no known length.'))
+    w.link_position.sliderPressed.connect(w.link_position_pressed)
+    w.link_position.sliderMoved.connect(w.link_position_moved)
+    w.link_position.sliderReleased.connect(w.link_position_released)
+    link_bar.addWidget(w.link_position)
+    w.link_time = QLabel('0:00')
+    w.link_time.setObjectName('muted')
+    link_bar.addWidget(w.link_time)
+    w.link_playback.setVisible(False)
+    video_header.addWidget(w.link_playback)
+    w.live_record_button = QPushButton('● Record window')
+    w.live_record_button.setToolTip('Record one window from the live camera and load it here.')
+    w.live_record_button.clicked.connect(w.record_live_window)
+    w.live_record_button.setVisible(False)
+    w.live_stop_button = QPushButton('■ Stop live')
+    w.live_stop_button.setToolTip('Stop the live camera.')
+    w.live_stop_button.clicked.connect(w.stop_live_camera)
+    w.live_stop_button.setVisible(False)
     w.build_pear_header(video_header)
     w.fps_label = QLabel("No clip loaded")
     w.fps_label.setObjectName("muted")
     w.fps_label.setMinimumWidth(0)
     w.fps_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
     w.fps_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    video_header.addWidget(w.live_record_button)
+    video_header.addWidget(w.live_stop_button)
     video_header.addWidget(w.fps_label, 1)
     overlay = QCheckBox("Overlays")
     overlay.setChecked(True)
@@ -161,6 +205,16 @@ def build_workspace(w):
     w.bone_overlay.setToolTip(tooltip_text('Show the skeleton used for FBX export over the motion mesh. Display only.'))
     w.bone_overlay.toggled.connect(w.render_changed)
     motion_header.addWidget(w.bone_overlay)
+    w.character_bones=QCheckBox('Character Bones')
+    w.character_bones.setChecked(True)
+    w.character_bones.setToolTip(tooltip_text('Show the imported (Mixamo) character own skeleton over its mesh, posed as it moves. Display only.'))
+    w.character_bones.toggled.connect(w.render_changed)
+    motion_header.addWidget(w.character_bones)
+    w.follow_source_box=QCheckBox('Follow Source')
+    w.follow_source_box.setChecked(False)
+    w.follow_source_box.setToolTip(tooltip_text('Preview only: imported characters copy the person shown in the 3D view at the playhead, instantly, without Retarget or baking. Off by default: characters show their retargeted (baked) motion. Export always uses Retarget.'))
+    w.follow_source_box.toggled.connect(w.render_changed)
+    motion_header.addWidget(w.follow_source_box)
     w.view_choice = QComboBox()
     w.view_choice.setToolTip(tooltip_text('Choose a viewing direction. This changes the camera, not the motion.'))
     w.view_choice.addItems(["Perspective", "Front", "Back", "Right", "Left", "Top", "Bottom", "Camera Preview"])
@@ -173,6 +227,14 @@ def build_workspace(w):
         w.view_choice.blockSignals(False)
     w.motion_view.view_changed.connect(view_changed)
     motion_header.addWidget(w.view_choice)
+    w.display_choice = QComboBox()
+    w.display_choice.setToolTip(tooltip_text('Choose what the 3D viewport draws. Characters Only shows just the imported (Mixamo) character, which follows the AI motion model. People Only hides the characters. Display only.'))
+    w.display_choice.addItems(['People + Characters', 'Characters Only', 'People Only'])
+    def display_changed(name):
+        w.motion_view.set_character_only(name == 'Characters Only')
+        w.motion_view.set_people_only(name == 'People Only')
+    w.display_choice.currentTextChanged.connect(display_changed)
+    motion_header.addWidget(w.display_choice)
     frame_view = button("Frame All", lambda:w.camera_tools.canvas.reset_view() if w.camera_tools.preview() else w.motion_view.frame_all(), motion_header)
     frame_view.setToolTip('Fit all visible people in the 3D view.')
     w.viewport_footer = QWidget()
@@ -182,16 +244,24 @@ def build_workspace(w):
     viewport_footer.setContentsMargins(9, 3, 6, 3)
     w.viewport_checks={}
     for label, attribute in (("Floor Grid", "show_grid"), ("Correction Floor", "show_correction_floor"), ("Motion Path", "show_trajectory"),
-                             ("Lock", "show_foot_locks"), ("Name", "show_names"), ("Camera", "show_cameras")):
+                             ("Lock", "show_foot_locks"), ("Coverage", "show_contact_coverage"),
+                             ("Occlusion", "show_motion_gaps"), ("Name", "show_names"), ("Camera", "show_cameras")):
         check = QCheckBox(label)
         w.viewport_checks[attribute]=check
         check.setChecked(getattr(w.motion_view, attribute))
-        check.setToolTip(tooltip_text({'show_grid': 'Show the reference grid at height zero. Does not change ground contact.', 'show_correction_floor': 'Show the correction floor height as an orange plane. Display only.', 'show_trajectory': 'Show the path followed by the person.', 'show_foot_locks': '', 'show_names': 'Show each person\'s name above their mesh. Rename people by right-clicking the People list. Display only.', 'show_cameras':'Show saved camera frustums and available camera motion. Display only; does not estimate or refit cameras.'}[attribute]))
+        check.setToolTip(tooltip_text({'show_grid': 'Show the reference grid at height zero. Does not change ground contact.', 'show_correction_floor': 'Show the correction floor height as an orange plane. Display only.', 'show_trajectory': 'Show the path followed by the person.', 'show_foot_locks': '', 'show_contact_coverage': 'Show where the correction holds a foot and where it leaves it free: the timeline tints uncovered time and prints a coverage percentage, and the 3D view outlines unconstrained soles. Display only; does not change the motion.', 'show_motion_gaps': 'Show frames where the person detector lost the actor, for example behind furniture: the timeline tints that time in amber with a seen percentage, and the 3D view marks the body with dashed amber bounds and an ESTIMATED tag. Motion there is filled in from the body model, or from the observed motion on both sides after Re-estimate Occluded Motion; it is never measured. Display only; does not change the motion.', 'show_names': 'Show each person\'s name above their mesh. Rename people by right-clicking the People list. Display only.', 'show_cameras':'Show saved camera frustums and available camera motion. Display only; does not estimate or refit cameras.'}[attribute]))
         if attribute=='show_names':w.name_labels=check
         if attribute=='show_foot_locks':
             check.setToolTip(tooltip_text('Show active foot and hand contacts as colored discs. Colors match the timeline. Display only; does not enable correction.'))
         def toggle(enabled, attr=attribute):
             setattr(w.motion_view, attr, enabled)
+            slider=getattr(w,'slider',None)
+            if attr=='show_contact_coverage' and slider is not None:
+                slider.show_contact_coverage=enabled
+                slider.update()
+            if attr=='show_motion_gaps' and slider is not None:
+                slider.show_motion_gaps=enabled
+                slider.update()
             if attr=='show_cameras':w.camera_tools.sync()
             w.motion_view.update()
         check.toggled.connect(toggle)
@@ -415,6 +485,14 @@ def build_workspace(w):
     flow_camera.addWidget(flow_help)
     flow_help.hide()
     w.model_choice.setItemData(w.model_choice.findData('flowhmr'),tooltip_text(flow_help.toolTip()),Qt.ToolTipRole)
+    w.flow_batch4=QCheckBox('4-Frame Batching')
+    w.flow_batch4.setChecked(True)
+    w.flow_batch4.setToolTip(tooltip_text('Run the Fast SAM feature extraction four frames at a time. About twice as fast on one GPU; Low Memory keeps one frame per batch. Applies on Reconstruct 3D.'))
+    w.flow_gpu_crop=QCheckBox('GPU Hand Crops')
+    w.flow_gpu_crop.setChecked(True)
+    w.flow_gpu_crop.setToolTip(tooltip_text('Resize the hand crops on the GPU instead of the CPU. About ten percent less feature time with Fast SAM. Applies on Reconstruct 3D.'))
+    flow_camera.addWidget(w.flow_batch4)
+    flow_camera.addWidget(w.flow_gpu_crop)
     w.model_pages.addWidget(w.flow_page)
     w.exmr_page=QWidget()
     w.exmr_page.setProperty('motion_tool','exmr')
@@ -428,6 +506,7 @@ def build_workspace(w):
     w.exmr_camera.addItem('Static Camera',True)
     w.exmr_camera.addItem('Moving Camera / SimpleVO',False)
     w.exmr_camera.setToolTip(tooltip_text('Choose Static Camera if the camera stays still without zooming. Choose Moving Camera if it moves. Applies next time you run Reconstruct 3D.'))
+    w.exmr_camera.currentIndexChanged.connect(w.update_readiness)
     exmr.addWidget(w.exmr_camera)
     from .camera_ui import BACKGROUND_HELP
     w.exmr_background=QCheckBox('Refine Camera Rotation')
@@ -448,6 +527,11 @@ def build_workspace(w):
     settings.setContentsMargins(0, 0, 0, 0)
     settings.setSpacing(10)
     settings.setAlignment(Qt.AlignTop)
+    w.camera_hint=WrappedLabel()
+    w.camera_hint.setObjectName('cameraHint')
+    w.camera_hint.setStyleSheet('color:#ffb45c; font-weight:600;')
+    w.camera_hint.hide()
+    settings.addWidget(w.camera_hint)
     correction=group('Motion Correction',settings)
     w.correction_group=correction.parentWidget()
     w.motion_correction=QCheckBox('Enable Correction')
@@ -465,7 +549,7 @@ def build_workspace(w):
     contact.addWidget(QLabel('Correction Mode'))
     w.correction_mode=QComboBox()
     for key,label in MODES.items():w.correction_mode.addItem(label,key)
-    w.correction_mode.setToolTip(tooltip_text('Flat Ground uses one floor height. Multi Level keeps each contact at its inferred height for stairs or slopes. It does not reconstruct the surfaces. Apply Correction to update.'))
+    w.correction_mode.setToolTip(tooltip_text('Flat Ground uses one floor height. Multi Level keeps each contact at its inferred height for stairs or slopes. It does not reconstruct the surfaces. Apply Correction to update. Automatic correction after reconstruction always grounds the scene on Flat Ground; choose Multi Level and Apply Correction for stairs or slopes.'))
     contact.addWidget(w.correction_mode)
     locks=QHBoxLayout();contact.addLayout(locks)
     w.foot_lock=QCheckBox('Foot');w.foot_lock.setChecked(True)
@@ -474,6 +558,10 @@ def build_workspace(w):
         locks.addWidget(checkbox);checkbox.toggled.connect(w.correction_settings_changed)
     w.foot_lock.setToolTip(tooltip_text('Reduce foot sliding during ground contact. Click Apply Correction to update. Turning this off keeps your saved contact timings.'))
     w.hand_lock.setToolTip(tooltip_text('Reduce hand sliding when resting on a floor or table by adjusting the arm. Review contact timings in the timeline, then click Apply Correction. Does not reposition the whole body for hanging poses.'))
+    w.occlusion_fill=QCheckBox('Re-estimate Occluded Motion');w.occlusion_fill.setChecked(True)
+    contact.addWidget(w.occlusion_fill)
+    w.occlusion_fill.setToolTip(tooltip_text('Rebuild only the frames where the person detector lost the actor, using the motion on both sides and keeping a foot that is locked on both sides planted. Detection gaps longer than 2 s are left as reconstructed. Click Apply Correction to update; the viewport Occlusion overlay shows the affected time.'))
+    w.occlusion_fill.toggled.connect(w.correction_settings_changed)
     w.correction_preset_label=QLabel('Lock Preset');contact.addWidget(w.correction_preset_label)
     w.correction_preset=QComboBox()
     for key in PRESETS:w.correction_preset.addItem(key.title(),key)
@@ -483,14 +571,27 @@ def build_workspace(w):
     w.preset_description=TooltipHelp('',w.correction_preset,w.correction_preset_label);w.preset_description.setObjectName('muted');w.preset_description.setWordWrap(True)
     contact.addWidget(w.preset_description)
     contact.addWidget(QLabel('Ground Contact / Correction Floor'))
-    w.auto_floor=QCheckBox('Auto Floor Height');w.auto_floor.setChecked(True)
+    w.auto_floor=QCheckBox('Auto Floor Height');w.auto_floor.setChecked(False)
     w.auto_floor.setToolTip(tooltip_text('Estimate floor height from the motion. Turn off to enter the height yourself.'))
     contact.addWidget(w.auto_floor)
+    w.floor_board=QCheckBox('Measure Floor (Reference Board)')
+    w.floor_board.setToolTip(tooltip_text('Use a printed reference sheet lying on the floor in the video as the measured floor. Save and print the sheet, lay it flat where the actor stands, and show it once in the clip. When no sheet is readable the floor falls back to the automatic estimate.'))
+    w.floor_board.toggled.connect(w.correction_settings_changed)
+    contact.addWidget(w.floor_board)
+    from .floor_board import PAPERS
+    w.floor_board_paper=QComboBox()
+    for key, spec in PAPERS.items():
+        w.floor_board_paper.addItem('{0} {1:.0f} x {2:.0f} mm'.format(key.upper(), spec['width'], spec['height']), key)
+    w.floor_board_paper.setCurrentIndex(w.floor_board_paper.findData('a1'))
+    w.floor_board_paper.setToolTip(tooltip_text('Printed size of the reference sheet. The app identifies the size from the sheet itself, so print whichever size your printer or print shop handles. A full-body shot from a few metres back needs A2 or A1: at A4 the markers are only a few pixels wide and cannot be read.'))
+    contact.addWidget(w.floor_board_paper)
+    w.floor_board_page=button('Printable Reference Sheet...',w.save_floor_board_page,contact)
+    w.floor_board_page.setToolTip(tooltip_text('Save the sheet used to measure the floor at the size chosen above. Print at 100% (actual size), lay it flat on the floor where the actor stands, and check the printed ruler measures 100 mm.'))
     w.floor_height_label=QLabel('Floor Height (World Y)')
     contact.addWidget(w.floor_height_label)
     w.floor_height=QDoubleSpinBox();w.floor_height.setRange(-10000,10000);w.floor_height.setDecimals(3)
     w.floor_height.setSingleStep(.01);w.floor_height.setSuffix(' m');w.floor_height.setEnabled(False)
-    w.floor_height.setToolTip(tooltip_text('Floor height in meters along the vertical Y axis. Turn off Auto Floor Height to edit. The gray reference grid stays at zero.'))
+    w.floor_height.setToolTip(tooltip_text('Floor height in meters along the vertical Y axis. Typing a value turns off Auto Floor Height. The gray reference grid stays at zero.'))
     contact.addWidget(w.floor_height)
     w.floor_description=TooltipHelp('Higher values raise the correction floor. Use the Correction Floor checkbox to preview it; Apply Correction updates the motion.',w.floor_height,w.floor_height_label,w.auto_floor)
     w.floor_description.setObjectName('muted');w.floor_description.setWordWrap(True);contact.addWidget(w.floor_description)
@@ -599,7 +700,15 @@ def build_workspace(w):
     root.addWidget(w.log)
 
     file_menu = w.menuBar().addMenu("File")
-    w.open_actions = [file_menu.addAction("Open Video...", w.choose_video), file_menu.addAction("Open Project...", w.choose_project)]
+    w.new_action = file_menu.addAction('New Project', w.new_session)
+    w.new_action.setShortcut('Ctrl+N')
+    file_menu.addSeparator()
+    w.open_actions = [file_menu.addAction("Open Video...", w.choose_video), file_menu.addAction("Open Video from URL...", w.choose_video_url), file_menu.addAction("Open Project...", w.choose_project)]
+    w.record_webcam_action = file_menu.addAction('Webcam live...', w.record_webcam)
+    w.record_webcam_action.setToolTip(tooltip_text('Record a short clip from a connected camera and open it here like any video. Keep the whole body in frame; a fixed camera suits the single-view models best.'))
+    w.live_url_action = file_menu.addAction('Live from URL...', w.live_from_url)
+    w.live_url_action.setToolTip(tooltip_text('Move the live character with a web video instead of a camera, without downloading it.\nPaste a direct video file, an HLS playlist, a YouTube or TikTok link, or a page that contains a video such as an X post. Find person then follows the video in real time and nothing is saved.\nFull reconstruction (Reconstruct 3D) still needs one download, because it re-reads the whole clip several times.'))
+    w.open_actions[1].setToolTip(tooltip_text('Open a video link: a direct video file, an HLS playlist, YouTube or TikTok, or a page that contains a video such as an X post.\nThe link plays in the live view without being saved; press Find person to move the character with it. Download beside the video title keeps the clip when it has to be reconstructed in full.'))
     w.import_character_action=file_menu.addAction('Import Character...',w.choose_character)
     w.import_character_action.setToolTip('Import a Mixamo FBX, VRM or PMX humanoid. Right-click its People row to retarget a source person.')
     w.save_project_action = file_menu.addAction('Save Project As...', w.save_project_as)
@@ -611,6 +720,22 @@ def build_workspace(w):
     w.export_preview_action = file_menu.addAction('Export Preview...', w.save_preview)
     w.export_preview_action.setToolTip(tooltip_text('Save the selected input video beside the current 3D viewport as MP4 over the timeline trim. Keeps the current view, visible people/characters and viewport overlays. Includes source audio when available. Not available in PEAR live mode.'))
     w.export_preview_action.setEnabled(False)
+    w.export_character_action = file_menu.addAction('Export Character as FBX...', lambda: w.export_character_from_menu('fbx'))
+    w.export_character_action.setToolTip(tooltip_text('Save the selected character with its skeleton and animation as FBX. PMX characters also offer VMD in the dialog.'))
+    w.export_character_glb_action = file_menu.addAction('Export Character as GLB...', lambda: w.export_character_from_menu('glb'))
+    w.export_character_glb_action.setToolTip(tooltip_text('Save the selected character with its skeleton, animation and optional mesh as glTF binary (GLB) for Blender, Unity, Godot and web viewers.'))
+    file_menu.addSeparator()
+    w.live_link_action = file_menu.addAction('Live Link to Blender')
+    w.live_link_action.setCheckable(True)
+    w.live_link_action.setToolTip(tooltip_text('Stream the displayed body pose to the RGB MoCap Bridge extension in Blender over localhost. Start it here, then press Start Live Link in Blender.\nScrubbing and playback in this window move the Blender character.'))
+    w.live_link_action.toggled.connect(w.toggle_live_link)
+    w.send_character_action = file_menu.addAction('Send Base Character to Cascadeur')
+    w.send_character_action.setToolTip(tooltip_text('Put the prepared T-pose base body into a new Cascadeur scene, then check it stands correctly.\nCascadeur does not accept this app\'s own FBX, so this uses the T-pose body exported through Blender.\nRun this once before Live Link to Cascadeur; the link composes every pose onto that rest.'))
+    w.send_character_action.triggered.connect(w.send_base_character)
+    w.cascadeur_link_action = file_menu.addAction('Live Link to Cascadeur')
+    w.cascadeur_link_action.setCheckable(True)
+    w.cascadeur_link_action.setToolTip(tooltip_text('Drive the character in Cascadeur from this window over localhost, with no file to export and re-import.\nStart Cascadeur, import the character you exported from here, then start this. Play, pause or scrub here and the Cascadeur take is written as you watch.\nLeave Cascadeur closed and nothing happens; the link is only created while Cascadeur is answering.'))
+    w.cascadeur_link_action.toggled.connect(w.toggle_cascadeur_link)
     file_menu.addAction("Open Project Folder", w.open_folder)
     file_menu.addSeparator()
     file_menu.addAction("Exit", w.close)
@@ -620,9 +745,16 @@ def build_workspace(w):
         "Space: Play / Pause\nLeft / Right: Step one frame\nShift + Left / Right: Step one second\nHome / End: First / last frame\n\nViewport: LMB orbit, MMB / RMB pan, wheel zoom\nGizmo: click an axis to align the view\nTimeline: drag video clip edges to trim\nClick the frame ruler or drag the blue frame box to seek\nWheel to zoom; MMB to pan; Reset Trim restores the full clip\nClick ? in the timeline header for editing help.\nPlayback and reconstruction use the selected video clip range.\n\nThe mesh shows the selected motion result.\nFlowHMR and ExMR track fingers directly. GVHMR uses optional HandFlow for finger tracking.\nUse File > Export to choose FBX, BVH or a portable Blender project and save the displayed animation."))
 
     menu_help = {
+        'New Project': 'Close the open video, project and live source and clear the workspace, without restarting the app.',
         'Open Video...': 'Choose a video to create motion from.',
+        'Open Video from URL...': 'Open a video file, playlist or page link like a local video.',
         'Open Project...': 'Open saved motion and settings without reconstructing the video.',
         'Open Project Folder': 'Open the current project folder in File Explorer.',
+        'Live from URL...': 'Move the live character with a web video, streaming it without a download.',
+        'Record from Webcam...': 'Record a clip from a camera and open it like any video.',
+        'Live Link to Blender': 'Stream the displayed pose to Blender on localhost.',
+        'Send Base Character to Cascadeur': 'Import the T-pose base body into a new Cascadeur scene.',
+        'Live Link to Cascadeur': 'Write the displayed pose into an open Cascadeur scene on localhost.',
         'Exit': 'Close RGB MoCap.',
         'Check System': 'Check hardware and required software. Results appear in the Console.',
         'Controls': 'Show keyboard shortcuts and workspace controls.',

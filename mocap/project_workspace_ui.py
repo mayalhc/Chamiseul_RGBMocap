@@ -144,6 +144,9 @@ class ModelWorkspace:
             self.restore_workspace_view(view)
             self.setWindowTitle('RGB MoCap | '+root.name)
             self.update_readiness()
+            # The camera stays live across a model switch; the character has to
+            # come back with the model that is now selected.
+            self.restart_live_character()
             return True
         except (OSError,ValueError,KeyError) as error:
             self.model_choice.blockSignals(True)

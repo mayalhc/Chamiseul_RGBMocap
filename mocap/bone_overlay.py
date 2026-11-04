@@ -118,7 +118,8 @@ def geometry(rest,parents,ends,key):
     packed=np.asarray(vertices,np.float32)
     return dict(packed=packed,faces=np.asarray(faces,np.uint32),edges=np.asarray(edges,np.uint32),
         vertex_count=len(packed),mode='rig',key=('bone-overlay-v3',*key),segments=segments,
-        endpoint_vertices=endpoint_vertices,octahedra=np.asarray(octahedra),joint_caps=joint_caps)
+        endpoint_vertices=endpoint_vertices,octahedra=np.asarray(octahedra),joint_caps=joint_caps,
+        rest=rest[:22].copy())
 
 
 def open_preview(project,kind,cancelled=lambda:False):

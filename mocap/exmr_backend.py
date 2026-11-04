@@ -221,6 +221,9 @@ def run_stage(project,stage,result,emit,force=False,feature_phase=None):
                     elif stage!='exmr' and (len(value)!=n or not torch.isfinite(value).all()):cached=False
     except (OSError,ValueError,KeyError,RuntimeError,EOFError):cached=False
     if cached:
+        if stage=='exmr_preprocess':
+            from .preview_keypoints import has_points, save_exmr
+            if not has_points(project):save_exmr(project,load(project/'exmr_keypoints.pt'))
         complete_stage(project,stage,project/outputs[0],old.get('elapsed',0),True,emit);return
     if not torch.cuda.is_available():raise RuntimeError('ExMR requires a supported NVIDIA CUDA GPU. Check System in Help for details.')
     started=time.monotonic()
@@ -249,6 +252,8 @@ def run_stage(project,stage,result,emit,force=False,feature_phase=None):
             finally:release(model)
         values=memory_run('ExMR Sapiens',keypoints,6.,emit)
         save_tensor(values,project/outputs[0])
+        from .preview_keypoints import save_exmr
+        save_exmr(project,values)
     elif stage=='exmr_features':
         directory=frame_dir(project,n)
         from exmr.preprocessing.body_features import SamBodyFeatures

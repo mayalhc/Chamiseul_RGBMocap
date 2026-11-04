@@ -23,8 +23,64 @@ def body_trajectory_root(parents, mapped):
         raise ValueError('The mapped humanoid body must share one hierarchy root.')
     return next(iter(roots))
 
+# glTF/GLB has no standard humanoid bone names. Accept the names of the common
+# exporters for each canonical joint, with the namespace and separators removed.
+GLB_ALIASES = {
+    'Hips': ('hips', 'pelvis', 'bip01pelvis', 'hip'),
+    'Spine': ('spine', 'spine01', 'spine0', 'abdomen'),
+    # VRM-style rigs name the middle chest bone 'chest' and the top one
+    # 'upperChest'; matching both to Spine2 made that chain ambiguous.
+    'Spine1': ('spine1', 'spine02', 'spine001', 'chest'),
+    'Spine2': ('spine2', 'spine03', 'spine3', 'spine002', 'upperchest'),
+    'Neck': ('neck', 'neck01'),
+    'Head': ('head', 'head01'),
+    'LeftShoulder': ('leftshoulder', 'shoulderl', 'claviclel', 'lclavicle'),
+    'RightShoulder': ('rightshoulder', 'shoulderr', 'clavicler', 'rclavicle'),
+    'LeftArm': ('leftarm', 'leftupperarm', 'upperarml', 'lupperarm'),
+    'RightArm': ('rightarm', 'rightupperarm', 'upperarmr', 'rupperarm'),
+    'LeftForeArm': ('leftforearm', 'leftlowerarm', 'lowerarml', 'forearml', 'lelbow'),
+    'RightForeArm': ('rightforearm', 'rightlowerarm', 'lowerarmr', 'forearmr', 'relbow'),
+    'LeftHand': ('lefthand', 'handl', 'lhand', 'wristl'),
+    'RightHand': ('righthand', 'handr', 'rhand', 'wristr'),
+    'LeftUpLeg': ('leftupleg', 'leftupperleg', 'thighl', 'upperlegl', 'lthigh'),
+    'RightUpLeg': ('rightupleg', 'rightupperleg', 'thighr', 'upperlegr', 'rthigh'),
+    'LeftLeg': ('leftleg', 'leftlowerleg', 'calfl', 'lowerlegl', 'shinl', 'lshin'),
+    'RightLeg': ('rightleg', 'rightlowerleg', 'calfr', 'lowerlegr', 'shinr', 'rshin'),
+    'LeftFoot': ('leftfoot', 'footl', 'lfoot'),
+    'RightFoot': ('rightfoot', 'footr', 'rfoot'),
+    'LeftToeBase': ('lefttoebase', 'lefttoes', 'lefttoe', 'toebasel', 'balll', 'ltoe', 'toel'),
+    'RightToeBase': ('righttoebase', 'righttoes', 'righttoe', 'toebaser', 'ballr', 'rtoe', 'toer'),
+}
+
+
+def normalized_bone(name):
+    """Drop exporter namespaces (mixamorig:, Armature|) and separators."""
+    return ''.join(ch for ch in name.replace('|', ':').split(':')[-1].lower() if ch.isalnum())
+
+
+def glb_mapping(bones):
+    """Match a glTF humanoid rig by bone name; manual mapping is not available."""
+    lookup={}
+    for name in bones:
+        lookup.setdefault(normalized_bone(name),[]).append(name)
+    resolved={}
+    for canonical in NAMES:
+        hits=[name for candidate in GLB_ALIASES[canonical] for name in lookup.get(candidate,[])]
+        if len(hits)>1:
+            raise ValueError('Ambiguous humanoid bones for '+canonical+': '+', '.join(hits))
+        if hits:resolved[canonical]=hits[0]
+    missing=[name for name in NAMES if name not in resolved]
+    if missing:
+        raise ValueError('Unsupported glTF humanoid rig. Missing bones for: '+', '.join(missing)
+                         +'. Use Mixamo, VRM, Unreal or Rigify-style humanoid names.')
+    if len(set(resolved.values()))!=len(NAMES):raise ValueError('Humanoid bones must have distinct mappings')
+    return [resolved[name] for name in NAMES]
+
+
 def body_mapping(kind,bones,semantic):
     names=set(bones)
+    if kind=='glb':
+        return glb_mapping(sorted(names))
     if kind=='mixamo':
         suffix={}
         for name in names:

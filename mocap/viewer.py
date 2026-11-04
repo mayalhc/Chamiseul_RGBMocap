@@ -5,8 +5,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QTimer
+from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 from .video_preview import PreviewDecoder
 from .viewport import MotionView
@@ -45,6 +45,9 @@ class VideoView(QWidget):
         self.zoom = 1.0
         self.pan = QPointF()
         self._pan_position = None
+        self.live_session = None
+        self.live_timer = None
+        self.live_box = None
 
     def reset_view(self):
         self.zoom = 1.0
@@ -164,6 +167,47 @@ class VideoView(QWidget):
             self._source_key = None
             self.decode_error.emit(message)
 
+    def open_camera(self, session):
+        """Show a live camera in place of a decoded file."""
+        self.shutdown()
+        self.live_box = None
+        self.live_session = session
+        self.source_size = (session.width, session.height)
+        self.boxes = self.observed = self.keypoints = self.confidence = None
+        self.index = 0
+        if self.live_timer is None:
+            self.live_timer = QTimer(self)
+            self.live_timer.setInterval(33)
+            self.live_timer.timeout.connect(self._present_live)
+        self.live_timer.start()
+        self.update()
+
+    def set_live_box(self, box):
+        """The detected person's box in live-source pixels, or None."""
+        self.live_box = None if box is None else np.asarray(box, dtype=float)
+        if self.live_session is not None:
+            self.update()
+
+    def _present_live(self):
+        session = self.live_session
+        if session is None or not session.running:
+            return
+        frame = session.snapshot()
+        if frame is None:
+            return
+        height, width, _ = frame.shape
+        self.frame = QImage(np.ascontiguousarray(frame).data, width, height,
+                            3 * width, QImage.Format_BGR888).copy()
+        self.index = session.frames
+        self.update()
+
+    def close_camera(self):
+        self.live_session = None
+        self.live_box = None
+        if self.live_timer is not None:
+            self.live_timer.stop()
+        self.frame = None
+
     def shutdown(self):
         self._end_pan()
         self._source_key = None
@@ -241,6 +285,12 @@ class VideoView(QWidget):
         else:ratio = rect.width() / self.source_size[0]
         offset_x, offset_y = rect.x(), rect.y()
         painter.drawImage(rect, self.frame)
+        if self.live_session is not None and self.live_box is not None:
+            box = self.live_box
+            painter.setPen(QPen(QColor('#ff9d45'), 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(QRectF(offset_x + box[0] * ratio, offset_y + box[1] * ratio,
+                                    (box[2] - box[0]) * ratio, (box[3] - box[1]) * ratio))
         if self.show_observations and self.boxes is not None and self.index < len(self.boxes):
             box = self.boxes[self.index]
             seen = bool(self.observed[self.index])

@@ -33,5 +33,14 @@ $env:PYTHONUTF8 = '1'
 & $uv python install 3.10.22 --install-dir $pythonDir --no-bin --no-registry --no-config --cache-dir $env:UV_CACHE_DIR
 if ($LASTEXITCODE -ne 0) { throw 'Private Python setup failed.' }
 $python = Join-Path $pythonDir 'cpython-3.10.22-windows-x86_64-none/python.exe'
+Write-Host 'Checking this PC against the pinned GPU runtimes...'
+& $python -I -B (Join-Path $root 'tools/preflight.py') --root $root
+$preflight = $LASTEXITCODE
+if ($preflight -eq 1) {
+    if ($env:RGBMOCAP_ALLOW_UNSUPPORTED_GPU -ne '1') {
+        throw 'This PC cannot run the pinned GPU runtimes. Install the NVIDIA driver shown above, or use a supported GPU (RTX 20 series or newer with the current driver), then rerun install.cmd. Set RGBMOCAP_ALLOW_UNSUPPORTED_GPU=1 only to install for inspection on another PC.'
+    }
+    Write-Host 'Continuing with an unsupported GPU because RGBMOCAP_ALLOW_UNSUPPORTED_GPU=1.'
+}
 & $python -I -X utf8 -B (Join-Path $root 'tools/git_managed_install.py') @args
 exit $LASTEXITCODE

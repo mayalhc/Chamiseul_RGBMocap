@@ -35,6 +35,7 @@ class TimelineSlider(FootLockEditor,QSlider):
         self._playhead_drag = None
         self.clip_in, self.clip_out = 0, 1
         self.trim_enabled = True
+        self.observed_spans = None
         self._trim_drag = None
         self.setMouseTracking(True)
         self.rangeChanged.connect(self.frame_all)
@@ -50,6 +51,15 @@ class TimelineSlider(FootLockEditor,QSlider):
         self.fps = fps
         if has_motion is not None:
             self.has_motion = has_motion
+        self.update()
+
+    def set_observed(self, spans):
+        """The frame spans to mark as already observed, or None to clear.
+
+        Stored for the workspace state; the spans are (first, last) pairs in
+        media frames.
+        """
+        self.observed_spans = spans
         self.update()
 
     def minimum_clip_frames(self):

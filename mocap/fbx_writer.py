@@ -1,8 +1,11 @@
 """Small original binary FBX 7.4 skeleton/animation writer.
 
-No SDK, Blender runtime, third-party implementation or body data is embedded.
-Node defaults carry the registered rest pose; PreRotation carries its axes.
-Only Hips has animated translation. End markers preserve terminal lengths.
+No SDK, Blender runtime, third-party implementation or registered body-model
+data is embedded. Node defaults carry the registered rest pose; PreRotation
+carries its axes. Only Hips has animated translation. End markers preserve
+terminal lengths. The optional skinned mesh is either the application's own
+rigid display geometry, one bone per vertex, or the displayed body surface with
+multi-influence cluster weights and explicit bind matrices.
 """
 import struct
 import warnings
@@ -65,8 +68,142 @@ def _euler(matrix):
         return Rotation.from_matrix(matrix).as_euler('xyz',degrees=True)
 
 
+def skinned_geometry(skin, rest, rest_frames, display):
+    """Place rigid display vertices in the FBX bind pose.
+
+    The viewer draws a display vertex as M(t) @ v, where M is the committed
+    animated bone matrix. FBX skinning computes
+    NodeWorld(t) @ TransformLink^-1 @ v', and this writer keeps
+    NodeWorld(t) = M(t) @ display. With TransformLink set to the bone's rest
+    world matrix and v' = W_rest @ display^T @ v both expressions are identical,
+    so the exported skin reproduces the displayed geometry exactly.
+    """
+    vertices=np.asarray(skin['vertices'],float)
+    normals=np.asarray(skin['normals'],float)
+    faces=np.asarray(skin['faces'],np.int32)
+    bones=np.asarray(skin['bones']).astype(int)
+    if vertices.ndim!=2 or vertices.shape[1]!=3 or not len(vertices):
+        raise ValueError('Invalid FBX skin vertices')
+    if normals.shape!=vertices.shape or bones.shape!=(len(vertices),):
+        raise ValueError('Invalid FBX skin attributes')
+    if faces.ndim!=2 or faces.shape[1]!=3 or not len(faces) or faces.min()<0 or faces.max()>=len(vertices):
+        raise ValueError('Invalid FBX skin topology')
+    if bones.min()<0 or bones.max()>=len(rest):raise ValueError('Invalid FBX skin bone index')
+    if not np.isfinite(vertices).all() or not np.isfinite(normals).all():
+        raise ValueError('Invalid FBX skin data')
+    rotation=rest_frames[bones]@display[bones].swapaxes(-1,-2)
+    placed=np.einsum('vij,vj->vi',rotation,vertices)+rest[bones]
+    normals=np.einsum('vij,vj->vi',rotation,normals)
+    length=np.linalg.norm(normals,axis=1)
+    if (length<1e-9).any():raise ValueError('Invalid FBX skin normal')
+    return placed,normals/length[:,None],faces,bones
+
+
+def bind_matrix(rotation, position):
+    """A bone's cluster TransformLink in the mesh's global frame."""
+    matrix=np.eye(4);matrix[:3,:3]=np.asarray(rotation,float);matrix[:3,3]=np.asarray(position,float)
+    return matrix
+
+
+def rigid_clusters(skin, rest, rest_frames, display):
+    """One full weight per vertex, bound to the skeleton's registered rest."""
+    placed,normals,faces,bones=skinned_geometry(skin,rest,rest_frames,display)
+    clusters=[]
+    for bone in np.unique(bones):
+        ids=np.flatnonzero(bones==bone).astype(np.int32)
+        clusters.append((int(bone),ids,np.ones(len(ids)),bind_matrix(rest_frames[bone],rest[bone])))
+    return placed,normals,faces,clusters
+
+
+def weighted_clusters(skin):
+    """Multi-influence skin whose stored vertices are already in the bind pose.
+
+    Every cluster carries its own bind matrix, so the exported surface follows
+    the displayed body exactly even though those bind matrices are not the
+    skeleton's own rest frames.
+    """
+    vertices=np.asarray(skin['vertices'],float)
+    normals=np.asarray(skin['normals'],float)
+    faces=np.asarray(skin['faces'],np.int32)
+    indices=np.asarray(skin['bones']).reshape(-1)
+    weights=np.asarray(skin['weights'],float).reshape(-1)
+    offsets=np.asarray(skin['offsets']).reshape(-1)
+    bind=np.asarray(skin['bind'],float)
+    count=len(vertices)
+    if vertices.ndim!=2 or vertices.shape[1]!=3 or not count or not np.isfinite(vertices).all():
+        raise ValueError('Invalid FBX skin vertices')
+    if normals.shape!=vertices.shape or not np.isfinite(normals).all() or np.min(np.linalg.norm(normals,axis=1))<1e-9:
+        raise ValueError('Invalid FBX skin normals')
+    if faces.ndim!=2 or faces.shape[1]!=3 or not len(faces) or faces.min()<0 or faces.max()>=count:
+        raise ValueError('Invalid FBX skin topology')
+    if offsets.shape!=(count+1,) or offsets[0]!=0 or offsets[-1]!=len(indices) or np.any(np.diff(offsets)<1):
+        raise ValueError('Invalid FBX skin influence offsets')
+    if weights.shape!=indices.shape or len(indices)!=offsets[-1]:
+        raise ValueError('Invalid FBX skin influence arrays')
+    if len(indices) and (indices.min()<0 or indices.max()>=len(bind)):
+        raise ValueError('Invalid FBX skin bone index')
+    if not np.isfinite(weights).all() or (weights<=0).any() or (weights>1).any():
+        raise ValueError('Invalid FBX skin weight')
+    if np.max(abs(np.add.reduceat(weights,offsets[:-1])-1))>1e-5:
+        raise ValueError('FBX skin weights must sum to one per vertex')
+    if bind.ndim!=3 or bind.shape[1:]!=(4,4) or not np.isfinite(bind).all():
+        raise ValueError('Invalid FBX skin cluster bind matrices')
+    for matrix in bind:
+        rotation=matrix[:3,:3]
+        if np.max(abs(rotation.T@rotation-np.eye(3)))>1e-5 or np.linalg.det(rotation)<0.99999:
+            raise ValueError('Invalid FBX skin cluster bind rotation')
+    owner=np.repeat(np.arange(count),np.diff(offsets))
+    clusters=[]
+    for bone in np.unique(indices):
+        selected=np.flatnonzero(indices==bone)
+        clusters.append((int(bone),owner[selected].astype(np.int32),weights[selected],bind[bone]))
+    return vertices,normals,faces,clusters
+
+
+def mesh_elements(rig_name, names, skin, rest, rest_frames, display):
+    """Geometry, Mesh model, Skin deformer and one weighted cluster per used bone."""
+    if skin.get('weights') is None:
+        placed,normals,faces,clusters=rigid_clusters(skin,rest,rest_frames,display)
+    else:
+        placed,normals,faces,clusters=weighted_clusters(skin)
+    polygons=faces.copy();polygons[:,2]=~polygons[:,2]
+    # No NodeAttribute: importers attach the connected Geometry as the mesh data,
+    # and a Mesh attribute would replace it with an empty object.
+    geometry_id,mesh_id,skin_id=7000,7100,7300
+    objects=[node('Geometry',geometry_id,rig_name+'Mesh\0\1Geometry','Mesh',children=[
+        properties(),node('GeometryVersion',124),
+        node('LayerElementNormal',0,children=[node('Version',101),node('Name',''),
+            node('MappingInformationType','ByPolygonVertex'),node('ReferenceInformationType','Direct'),
+            node('Normals',np.ascontiguousarray(normals[faces].reshape(-1)))]),
+        node('Layer',0,children=[node('Version',100),
+            node('LayerElement',children=[node('Type','LayerElementNormal'),node('TypedIndex',0)])]),
+        node('Vertices',np.ascontiguousarray(placed.reshape(-1))),
+        node('PolygonVertexIndex',np.ascontiguousarray(polygons.reshape(-1)))]),
+        node('Model',mesh_id,rig_name+'Mesh\0\1Model','Mesh',children=[node('Version',232),properties(
+            prop('Lcl Translation','Lcl Translation',0.,0.,0.,flags='A'),
+            prop('Lcl Rotation','Lcl Rotation',0.,0.,0.,flags='A'),
+            prop('Lcl Scaling','Lcl Scaling',1.,1.,1.,flags='A'),
+            prop('InheritType','enum',1))]),
+        node('Deformer',skin_id,'skin\0\1SubDeformer','Skin',children=[node('Version',101),node('Link_DeformAcuracy',50.)])]
+    connections=[node('C','OO',geometry_id,mesh_id),
+        node('C','OO',skin_id,geometry_id),node('C','OO',mesh_id,900)]
+    used=0;influences=0
+    for j,ids,weights,bind in clusters:
+        used+=1;influences+=len(ids)
+        cluster=7400+j
+        objects.append(node('Deformer',cluster,names[j]+'\0\1SubDeformer','Cluster',children=[
+            node('Version',100),node('UserData','',''),
+            node('Indexes',np.ascontiguousarray(ids.astype(np.int32))),
+            node('Weights',np.ascontiguousarray(weights.astype(np.float64))),
+            node('Transform',np.ascontiguousarray(np.linalg.inv(bind).T.reshape(-1))),
+            node('TransformLink',np.ascontiguousarray(bind.T.reshape(-1)))]))
+        connections.append(node('C','OO',cluster,skin_id))
+        connections.append(node('C','OO',1000+j,cluster))
+    return objects,connections,dict(vertices=len(placed),polygons=len(faces),clusters=used,influences=influences)
+
+
 def write(path, names, parents, rest, rest_frames, display, tip_local, frames, fps,
-          transform=None, progress=lambda *args:None, rig_name='SourceAnimation', prepend_tpose=False):
+          transform=None, progress=lambda *args:None, rig_name='SourceAnimation', skin=None, prepend_tpose=False):
     """Write one committed mapped take; working rotation arrays are one bone wide."""
     from .person_names import validate_name
     rig_name=validate_name(rig_name)
@@ -93,9 +230,13 @@ def write(path, names, parents, rest, rest_frames, display, tip_local, frames, f
     # Empty parent is an FBX armature container, not an extra animated bone.
     objects.append(node('Model',900,rig_name+'\0\1Model','Null',children=[node('Version',232),properties()]))
     link(900,0)
+    # The exported node world is the displayed basis of each bone, so the rest used
+    # for PreRotation and for the animation deltas carries the same display basis.
+    display=np.asarray(display,float)
+    rest_display=np.asarray(rest_frames,float)@display
     local_rest=[];offsets=[]
     for j,p in enumerate(parents):
-        R=rest_frames[j] if p<0 else rest_frames[p].T@rest_frames[j]
+        R=rest_display[j] if p<0 else rest_display[p].T@rest_display[j]
         t=rest[j] if p<0 else rest_frames[p].T@(rest[j]-rest[p])
         local_rest.append(R);offsets.append(t)
         children=[node('Version',232),properties(
@@ -115,10 +256,13 @@ def write(path, names, parents, rest, rest_frames, display, tip_local, frames, f
             node('Version',232),properties(prop('Lcl Translation','Lcl Translation',*map(float,tip_local[j]),flags='A'))]))
         objects.append(node('NodeAttribute',4000+j,names[j]+'_end\0\1NodeAttribute','LimbNode',children=[node('TypeFlags','Skeleton')]))
         link(4000+j,marker);link(marker,ids[j])
+    if skin is not None:
+        mesh,mesh_links,counts=mesh_elements(rig_name,names,skin,rest,rest_frames,display)
+        objects.extend(mesh);connections.extend(mesh_links)
     # Store an explicit bind-pose table in addition to the node defaults.
     pose_nodes=[node('PoseNode',children=[node('Node',900),node('Matrix',np.eye(4).T.reshape(-1))])]
     for j in range(52):
-        M=np.eye(4);M[:3,:3]=rest_frames[j];M[:3,3]=rest[j]
+        M=np.eye(4);M[:3,:3]=rest_display[j];M[:3,3]=rest[j]
         pose_nodes.append(node('PoseNode',children=[node('Node',int(ids[j])),node('Matrix',M.T.reshape(-1))]))
     objects.append(node('Pose',5000,'BindPose\0\1Pose','BindPose',children=[node('Type','BindPose'),node('Version',100),node('NbPoseNodes',len(pose_nodes)),*pose_nodes]))
     # Zero-based file times import at frame 1 with Blender's default offset 1.

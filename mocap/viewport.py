@@ -15,6 +15,11 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from .preview_data import mapped_array, motion_summary, close_array
 from .foot_contacts import FOOT_COLORS
 from .footlock_editor import CONTACT_COLORS
+from .motion_gaps import COLOR as GAP_COLOR
+
+# Unconstrained soles: same foot colours stay assigned to held contacts, so the
+# free state needs its own warm tint rather than a reused lane colour.
+FREE_FOOT_COLORS = ('#c2564b', '#c2564b')
 
 OPENGL_VIEW = os.environ.get("QT_QPA_PLATFORM") != "offscreen"
 ViewportBase = QOpenGLWidget if OPENGL_VIEW else QWidget
@@ -47,6 +52,11 @@ class MotionView(ViewportBase):
         self.rotations = None
         self.mesh_frames = self.mesh_asset = self.mesh_renderer = None
         self.mesh_binding=None
+        self.live_body_mode = False
+        # Shown until the live solver publishes its first pose: the wait is the
+        # model warming up, not a broken view.
+        self.live_message = ''
+        self.live_progress = None
         self.mesh_error = None
         self.mesh_presented_index = None
         self.body_color = QColor('#b5b5b5')
@@ -84,6 +94,9 @@ class MotionView(ViewportBase):
         self.correction_floor_enabled = True
         self.show_trajectory = True
         self.show_foot_locks = True
+        self.show_contact_coverage = True
+        self.show_motion_gaps = True
+        self.observed_spans = None
         self.show_names = True
         self.show_cameras=False;self.camera_records=[];self.camera_message='';self.camera_translation_scale=0.
         self.actor_name = 'Person 1'
@@ -100,7 +113,9 @@ class MotionView(ViewportBase):
         self.scene_time=0.;self.scene_renderers={};self.scene_presented={}
         self.character_workspace=None;self.character_renderers={};self.character_error=None
         self.character_name_points=[]
-        self.render_mode='raw';self.show_bones=True
+        self.character_only=False;self.people_only=False
+        self.render_mode='raw';self.show_bones=True;self.show_character_bones=True
+        self.frame_stamp=None
         self.target_frames=None;self.target_asset=None;self.raw_asset=None;self.native_vertices=None
         self.target_renderers={};self.bone_renderers={};self.bone_error=None;self.native_required=False
         # A bounded world-space disk, reused for either foot on every frame.
@@ -234,7 +249,11 @@ class MotionView(ViewportBase):
                 entries.append(((take.ident,str(take.project)),take.target_asset['bones'],take.arrays['rig'][frame],frame,take.transform))
         elif self.joints is not None:
             if self.target_asset is not None and 'bones' in self.target_asset and self.target_frames is not None:
-                entries.append(('single',self.target_asset['bones'],self.target_frames[self.index],self.index,None))
+                # The live preview presents the newest solve at index 0, so the
+                # pose has to be told what it is: without a stamp the renderer
+                # keeps the first frame and the character freezes.
+                entries.append(('single',self.target_asset['bones'],self.target_frames[self.index],
+                                (self.index,self.frame_stamp),None))
             else:missing=True
         if OPENGL_VIEW and entries:
             painter.beginNativePainting()
@@ -258,6 +277,27 @@ class MotionView(ViewportBase):
             painter.drawText(self.rect().adjusted(18,105,-95,-80),Qt.AlignTop|Qt.TextWordWrap,
                 self.bone_error or 'Export bone overlay unavailable for this result. Use Prepare Preview / Apply Correction.')
 
+    def draw_character_bones(self,painter):
+        """The imported character's own skeleton, posed as it is drawn."""
+        workspace=self.character_workspace
+        rows=getattr(workspace,'character_bone_rows',None) if workspace is not None else None
+        if not self.show_character_bones or not rows or self.people_only:return
+        painter.save()
+        try:
+            for positions,parents,transform in rows.values():
+                points=np.asarray(positions,dtype=float)
+                if transform is not None:
+                    T=np.asarray(transform);points=points@T[:3,:3].T+T[:3,3]
+                xy,depth,focal=self.project(points)
+                painter.setPen(QPen(QColor('#69c9b8'),2))
+                for i,parent in enumerate(parents):
+                    if parent<0 or depth[i]<.08 or depth[parent]<.08:continue
+                    painter.drawLine(QPointF(*xy[parent]),QPointF(*xy[i]))
+                painter.setPen(Qt.NoPen);painter.setBrush(QColor('#e8fff9'))
+                for i in range(len(points)):
+                    if depth[i]>=.08:painter.drawEllipse(QPointF(*xy[i]),2.6,2.6)
+        finally:painter.restore()
+
     def scene_actors(self):
         return self.people_scene.actors_at(self.scene_time,self.scene_visible,self.path.parent if self.path else None) if self.people_scene else []
 
@@ -274,11 +314,15 @@ class MotionView(ViewportBase):
                 rig=take.arrays.get('rig')
                 points=body_points(joints[frame],rig[frame] if rig is not None else None,
                                    take.target_asset,take.transform)
-                entries.append((self.scene_names.get(take.ident,f'Person {take.ident}'),points))
+                name=self.scene_names.get(take.ident,f'Person {take.ident}')
+                if self.estimated(getattr(take,'observed_spans',None),frame):name+=' · estimated'
+                entries.append((name,points))
         elif self.single_actor_visible and self.joints is not None and not self.mesh_error and self.mesh_presented_index==self.index:
             points=body_points(self.joints[self.index],
                               self.target_frames[self.index] if self.target_frames is not None else None,self.target_asset)
-            entries.append((self.actor_name,points))
+            name=self.actor_name
+            if self.estimated(self.observed_spans,self.index):name+=' · estimated'
+            entries.append((name,points))
         entries.extend(self.character_name_points)
         painter.save()
         font=QFont(painter.font());font.setPixelSize(14);font.setWeight(QFont.DemiBold)
@@ -297,6 +341,20 @@ class MotionView(ViewportBase):
             painter.drawText(rect.adjusted(10,0,-10,0),Qt.AlignCenter,text)
             self.name_labels_presented.append((name,rect))
         painter.restore()
+
+    def estimated(self,spans,frame):
+        """True when this frame's motion was interpolated, not observed."""
+        return bool(self.show_motion_gaps and spans is not None and spans.gap_at(frame))
+
+    def draw_estimated_box(self,painter,points,lines3d):
+        """Dashed amber bounds mark a body whose motion was estimated."""
+        points=np.asarray(points,dtype=float)[:22]
+        if not points.size or not np.all(np.isfinite(points)):return
+        low,high=points.min(0)-.07,points.max(0)+.07
+        corners=np.array([[x,y,z] for x in (low[0],high[0])
+                          for y in (low[1],high[1]) for z in (low[2],high[2])])
+        edges=[(a,b) for a in range(8) for b in range(a+1,8) if bin(a^b).count('1')==1]
+        lines3d(np.stack([corners[a],corners[b]] for a,b in edges),GAP_COLOR,1.4,Qt.DashLine)
 
     def set_body_color(self,color):
         chosen=QColor(color)
@@ -362,6 +420,20 @@ class MotionView(ViewportBase):
                 aspect=max(.4,self.width()/max(1,self.height()))
                 self.distance=max(self.distance,span*.60/math.tan(math.radians(20))/min(1.,aspect))
                 self.update()
+
+    def set_character_only(self, enabled):
+        # Inspect imported characters on their own: the reconstructed source
+        # bodies and their export bones stay loaded but are not drawn.
+        self.character_only=bool(enabled)
+        self.update()
+
+    def set_people_only(self, enabled):
+        self.people_only=bool(enabled)
+        self.update()
+
+    def characters_only_active(self):
+        if not self.character_only or self.character_workspace is None:return False
+        return any(c.get('visible',True) for c in self.character_workspace.characters)
 
     def set_follow(self, enabled):
         self.follow = enabled
@@ -493,7 +565,8 @@ class MotionView(ViewportBase):
     def draw_characters(self,painter):
         self.character_name_points=[]
         workspace=self.character_workspace
-        if workspace is None or not OPENGL_VIEW:return False
+        if workspace is None or not OPENGL_VIEW or self.people_only:return False
+        workspace.character_bone_rows={}
         draws=list(workspace.character_draws())
         drawn=False
         painter.beginNativePainting()
@@ -544,21 +617,34 @@ class MotionView(ViewportBase):
         self._pear_notice.hide()
         self.paint_scene(None)
 
-    def foot_lock_discs(self,index,joints,activity=None,floor=None):
-        """Return at most two fixed-size circles on the displayed floor plane."""
-        if not self.show_foot_locks:return []
+    def foot_contact_discs(self,index,joints,activity,floor,held):
+        """Fixed-size circles on the displayed floor plane, held or free."""
         active = activity if activity is not None else self.foot_lock_activity(index) if self.foot_lock_activity is not None else (False,False)
         discs = []
         if floor is None and getattr(self,'foot_lock_levels',None) is not None:
             floor=self.foot_lock_levels(index)
         for foot, locked in enumerate(active[:2]):
-            if not locked:continue
+            if bool(locked)!=held:continue
             center = (joints[7+foot] + joints[10+foot]) * .5
             level=self.floor if floor is None else floor[foot] if isinstance(floor,(list,tuple,np.ndarray)) else floor
             center[1] = level + .008
             if np.all(np.isfinite(center)):
                 discs.append((foot, self._contact_circle + center))
         return discs
+
+    def foot_lock_discs(self,index,joints,activity=None,floor=None):
+        """Return at most two fixed-size circles on the displayed floor plane."""
+        if not self.show_foot_locks:return []
+        return self.foot_contact_discs(index,joints,activity,floor,True)
+
+    def foot_free_discs(self,index,joints,activity=None,floor=None):
+        """Soles the correction leaves unconstrained at this frame.
+
+        Drawn as an open outline instead of a filled disc, so one foot reads as
+        held or free without changing the disc geometry or the depth pass.
+        """
+        if not (self.show_foot_locks and self.show_contact_coverage):return []
+        return self.foot_contact_discs(index,joints,activity,floor,False)
 
     def set_correction_floor(self,height,automatic=True,pending=False,enabled=True):
         self.correction_floor=float(height) if height is not None and math.isfinite(height) else None
@@ -645,8 +731,9 @@ class MotionView(ViewportBase):
 
     def draw_foot_locks(self,painter,index,joints,activity=None,floor=None):
         self.draw_contact_discs(painter,self.foot_lock_discs(index,joints,activity,floor),FOOT_COLORS)
+        self.draw_contact_discs(painter,self.foot_free_discs(index,joints,activity,floor),FREE_FOOT_COLORS,alpha=215,filled=False)
 
-    def draw_contact_discs(self,painter,discs,colors):
+    def draw_contact_discs(self,painter,discs,colors,alpha=125,filled=True):
         for side,points in discs:
             # Clip against the camera near plane before perspective division.
             eye,basis = self._paint_camera if self._paint_camera is not None else self.camera()
@@ -664,12 +751,17 @@ class MotionView(ViewportBase):
             xy=view[:,:2]*focal/view[:,2:]
             xy[:,0]+=self.width()/2
             xy[:,1]=self.height()/2-xy[:,1]
-            color=QColor(colors[side]);color.setAlpha(125)
-            painter.setBrush(color)
-            painter.setPen(QPen(QColor(colors[side]),1.5))
+            color=QColor(colors[side]);color.setAlpha(alpha)
+            painter.setBrush(color if filled else Qt.NoBrush)
+            if filled:
+                painter.setPen(QPen(QColor(colors[side]),1.5))
+            else:
+                # Dashed outline: drawn, but never mistakable for a held contact.
+                painter.setPen(QPen(QColor(colors[side]),2.,Qt.DashLine))
             painter.drawPolygon(QPolygonF([QPointF(*point) for point in xy]))
 
     def draw_mesh(self,painter,index):
+        if self.characters_only_active():return
         if self.native_vertices is not None or self.native_required:
             if self.raw_asset is None or self.native_vertices is None:
                 painter.setPen(QColor('#e0b06c'));painter.drawText(self.rect().adjusted(25,100,-25,-60),Qt.AlignCenter|Qt.TextWordWrap,
@@ -687,6 +779,8 @@ class MotionView(ViewportBase):
                 if self.mesh_error:
                     painter.setPen(QColor('#e0b06c'));painter.drawText(18,90,self.mesh_error)
             return
+        if self.live_body_mode and (self.mesh_frames is None or self.mesh_asset is None):
+            return
         if self.mesh_frames is None or self.mesh_asset is None:
             message = "Mesh data unavailable. Click Prepare Mesh."
         elif not OPENGL_VIEW:
@@ -702,7 +796,8 @@ class MotionView(ViewportBase):
                 self.ensure_mesh_renderer(renderer_type)
                 self.mesh_renderer.load(self.mesh_asset)
                 if self.mesh_binding is not None:self.mesh_renderer.bind_skin(self.mesh_binding)
-                self.mesh_renderer.deform(self.mesh_frames[index],(str(self.path),id(self.mesh_frames),index))
+                self.mesh_renderer.deform(self.mesh_frames[index],
+                    (str(self.path),id(self.mesh_frames),index,self.frame_stamp))
                 self.mesh_renderer.draw(*self._paint_camera,self.width(),self.height(),
                     (self.body_color.redF(),self.body_color.greenF(),self.body_color.blueF()))
                 self.mesh_presented_index = index
@@ -738,6 +833,8 @@ class MotionView(ViewportBase):
             if take.ident==self.scene_selected and self.path is not None and take.project==self.path.parent:
                 self.draw_foot_locks(painter,frame,joints,floor=floor)
             else:self.draw_foot_locks(painter,frame,joints,take.active_contacts(frame),floor)
+            if self.estimated(getattr(take,'observed_spans',None),frame):
+                self.draw_estimated_box(painter,joints,lines3d)
         # Both contact types use the same background pass; all actor meshes
         # and export bones subsequently occlude them.
         self.draw_people_hand_locks(painter,actors)
@@ -816,7 +913,7 @@ class MotionView(ViewportBase):
         def line3d(a, b, color, width=1):
             lines3d([[a, b]], color, width)
 
-        def lines3d(lines, color, width=1):
+        def lines3d(lines, color, width=1, style=Qt.SolidLine):
             if not len(lines):
                 return
             eye, basis = self._paint_camera
@@ -834,7 +931,7 @@ class MotionView(ViewportBase):
             xy = view[:, :, :2] * focal / np.maximum(view[:, :, 2:], 0.08)
             xy[:, :, 0] += self.width() / 2
             xy[:, :, 1] = self.height() / 2 - xy[:, :, 1]
-            painter.setPen(QPen(QColor(color), width, Qt.SolidLine, Qt.RoundCap))
+            painter.setPen(QPen(QColor(color), width, style, Qt.RoundCap))
             painter.drawLines([QLineF(*segment.reshape(-1)) for segment in xy])
 
         floor = self.floor
@@ -857,10 +954,15 @@ class MotionView(ViewportBase):
         bone_actors=[]
 
         if self.people_mode:
+            characters_only=self.characters_only_active()
             if self.people_scene is not None:
-                actors=self.scene_actors()
-                self.draw_people_scene(painter,actors,lines3d)
+                actors=[] if characters_only else self.scene_actors()
+                if actors:self.draw_people_scene(painter,actors,lines3d)
                 bone_actors=actors
+                if characters_only:
+                    shown=sum(1 for c in self.character_workspace.characters if c.get('visible',True))
+                    painter.setPen(QColor('#bebebe'))
+                    painter.drawText(18,53,f'Characters only | {shown} characters | Source bodies hidden')
             else:
                 painter.setPen(QColor('#bcbcbc'))
                 painter.drawText(self.rect().adjusted(25,60,-25,-60),Qt.AlignCenter|Qt.TextWordWrap,self.scene_message)
@@ -868,6 +970,8 @@ class MotionView(ViewportBase):
                 painter.setPen(QColor('#e0b06c'));painter.drawText(self.rect().adjusted(18,80,-100,-80),Qt.AlignTop|Qt.TextWordWrap,self.mesh_error)
         elif not self.single_actor_visible:
             self._empty_people_notice=f'{self.actor_name} is hidden. Check it in the People list to show.'
+        elif self.joints is None and (self.live_progress or self.live_message):
+            self.draw_live_progress(painter)
         elif self.joints is None and not (self.character_workspace and self.character_workspace.characters):
             painter.setPen(QColor("#bcbcbc"))
             painter.drawText(self.rect().adjusted(25, 30, -25, -30), Qt.AlignCenter | Qt.TextWordWrap,
@@ -912,9 +1016,22 @@ class MotionView(ViewportBase):
                 painter.setBrush(QColor("#66baff"))
                 painter.drawPolygon(QPolygonF([QPointF(*point) for point in arrow]))
             self.draw_mesh(painter,index)
+            if self.estimated(self.observed_spans,index):
+                self.draw_estimated_box(painter,joints,lines3d)
             bone_actors=None
             painter.setPen(QColor("#bebebe"))
-            painter.drawText(QRectF(18, 39, self.width() - 36, 20), Qt.AlignLeft, f"Frame {index + 1} / {len(self.joints)}")
+            counter=f"Frame {index + 1} / {len(self.joints)}"
+            painter.drawText(QRectF(18, 39, self.width() - 36, 20), Qt.AlignLeft, counter)
+            if self.estimated(self.observed_spans,index):
+                painter.save()
+                font=QFont(painter.font());font.setPixelSize(11);painter.setFont(font)
+                text='ESTIMATED'
+                metrics=painter.fontMetrics()
+                box=QRectF(18+metrics.horizontalAdvance(counter)+8,39,metrics.horizontalAdvance(text)+14,19)
+                painter.setPen(Qt.NoPen);painter.setBrush(QColor(58,41,16,225))
+                painter.drawRoundedRect(box,3,3)
+                painter.setPen(QColor('#e2b263'));painter.drawText(box,Qt.AlignCenter,text)
+                painter.restore()
             painter.drawText(QRectF(18, 60, self.width() - 36, 20), Qt.AlignLeft,
                              f"X {joints[0, 0]:+.2f}   Z {joints[0, 2]:+.2f} m")
         if self.show_cameras:
@@ -934,6 +1051,7 @@ class MotionView(ViewportBase):
         # Final independent depth layer: exported bones stay above characters,
         # with the same ordering whether Bone Overlay was on or off previously.
         self.draw_bones(painter,bone_actors)
+        self.draw_character_bones(painter)
         if self._empty_people_notice and not characters_drawn:
             painter.setPen(QColor('#bcbcbc'))
             painter.drawText(self.rect().adjusted(25,60,-25,-60),Qt.AlignCenter|Qt.TextWordWrap,
@@ -988,8 +1106,69 @@ class MotionView(ViewportBase):
                 painter.drawText(QRectF(end.x() - 8, end.y() - 8, 16, 16), Qt.AlignCenter, letter)
             self._gizmo_hits.append((end, name))
         # Keep names readable even when a badge approaches the viewport HUD.
-        self.draw_names(painter,self.scene_actors() if self.people_scene is not None else [] if self.people_mode else None)
+        if self.people_scene is not None:
+            names=[] if self.characters_only_active() else self.scene_actors()
+        else:
+            names=[] if self.people_mode else None
+        self.draw_names(painter,names)
         self._paint_camera = None
         painter.end()
+
+    def draw_live_progress(self, painter):
+        """The live start-up wait as numbers: step, percent, elapsed seconds.
+
+        The first pose arrives after the solver loads its models and runs its
+        first inference, so the block names that step and counts it out instead
+        of showing a bare "starting" that reads as a stall.
+        """
+        progress = self.live_progress
+        if not progress:
+            painter.setPen(QColor('#bcd0e6'))
+            painter.drawText(self.rect().adjusted(25, 30, -25, -30), Qt.AlignCenter | Qt.TextWordWrap,
+                             self.live_message)
+            return
+        try:
+            percent = max(0.0, min(100.0, float(progress.get('percent', 0.0))))
+            seconds = max(0.0, float(progress.get('seconds', 0.0)))
+        except (TypeError, ValueError):
+            percent, seconds = 0.0, 0.0
+        try:
+            step, steps = int(progress.get('step', 0) or 0), int(progress.get('steps', 0) or 0)
+        except (TypeError, ValueError):
+            step, steps = 0, 0
+        title = str(progress.get('title') or 'Live character is starting')
+        stage = str(progress.get('stage') or 'Waiting for the solver')
+        painter.save()
+        width = max(0.0, self.width() - 50.0)
+        left = 25.0
+        center = left + width / 2.0
+        bar_width = min(300.0, max(140.0, width * 0.45))
+        top = max(40.0, self.height() / 2.0 - 62.0)
+        title_font = painter.font()
+        title_font.setPixelSize(14)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor('#e6eef8'))
+        painter.drawText(QRectF(left, top, width, 22), Qt.AlignHCenter | Qt.AlignVCenter, title)
+        stage_font = painter.font()
+        stage_font.setPixelSize(12)
+        stage_font.setBold(False)
+        painter.setFont(stage_font)
+        painter.setPen(QColor('#bcd0e6'))
+        step_text = f'Step {step} of {steps}  ·  ' if step > 0 and steps > 0 else ''
+        painter.drawText(QRectF(left, top + 26, width, 20), Qt.AlignHCenter | Qt.AlignVCenter,
+                         f'{stage}  ·  {step_text}{percent:.0f}%')
+        bar = QRectF(center - bar_width / 2.0, top + 54, bar_width, 8)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(38, 46, 56, 230))
+        painter.drawRoundedRect(bar, 4, 4)
+        if percent > 0.0:
+            painter.setBrush(QColor('#6fa8dc'))
+            painter.drawRoundedRect(QRectF(bar.left(), bar.top(),
+                                           bar.width() * percent / 100.0, bar.height()), 4, 4)
+        painter.setPen(QColor('#9fb3c8'))
+        painter.drawText(QRectF(left, top + 68, width, 20), Qt.AlignHCenter | Qt.AlignVCenter,
+                         f'{seconds:.1f} s elapsed')
+        painter.restore()
 
 

@@ -1,7 +1,8 @@
 """Source-faithful animation rig, separate from the contact solver's rig.
 
 Straight rest limbs retain the actor's lengths. Constant source bases transport
-the original animation; only outgoing limb roll is stabilised. Joint positions,
+the original animation; only outgoing limb roll is stabilised, including the
+shin's axial roll against its own foot heading. Joint positions,
 root/trunk animation, distal world frames and the original surface are retained.
 This deliberately replaces the export fitter's hard Cartesian hinge projection.
 """
@@ -10,7 +11,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.spatial.transform import Rotation
 from .mixamo_rig import HINGES, align, fk, unit
 
-FIT_VERSION = 17
+FIT_VERSION = 18
 
 
 def temporal_halo(fps=30.):
@@ -61,6 +62,46 @@ def _frame(direction, pole, fallback):
     alt = cardinal - y * np.sum(cardinal * y, axis=-1, keepdims=True)
     x = unit(np.where(np.linalg.norm(x, axis=-1, keepdims=True) > 1e-8, x, alt))
     return np.stack((x, y, unit(np.cross(x, y))), axis=-1)
+
+
+def _shin_roll(rig, world, points, fps):
+    """Realign each shin's axial roll to its own foot heading.
+
+    The rig knee is a pure hinge, so the shin inherits the thigh's roll and the
+    calf can keep a constant angle away from the foot it belongs to - the lower
+    leg then reads as spiral-twisted while every bone length is still correct.
+    Only the roll about the shin's own length changes: the shin direction and
+    every joint position stay exact, and because each frame is absolute the
+    foot's world orientation is preserved too (its local rotation absorbs the
+    difference).
+    """
+    for upper, middle, end, hinge in HINGES:
+        if upper >= 16:
+            continue
+        axis = np.asarray(hinge, dtype=float)
+        rest = _frame(rig['rest'][end] - rig['rest'][middle], axis, axis)
+        rest_shin = unit(rig['rest'][end] - rig['rest'][middle])
+        rest_toe = unit(rig['rest'][end + 3] - rig['rest'][end])
+        rest_forward = rest_toe - rest_shin * (rest_toe @ rest_shin)
+        rest_lateral = unit(np.cross(rest_shin, rest_forward)) if np.linalg.norm(rest_forward) > 1e-6 else rest[:, 0]
+        # Keep one sign convention per side, taken from the registered rest pose.
+        flip = 1. if rest_lateral @ rest[:, 0] >= 0 else -1.
+        shin = unit(points[:, end] - points[:, middle])
+        toe = unit(points[:, end + 3] - points[:, end])
+        forward = toe - shin * np.sum(toe * shin, axis=-1, keepdims=True)
+        usable = np.linalg.norm(forward, axis=-1) > 1e-6
+        lateral = flip * unit(np.cross(shin, forward))
+        current = world[:, middle] @ rest[:, 0]
+        sine = np.sum(shin * np.cross(current, lateral), axis=-1)
+        cosine = np.sum(current * lateral, axis=-1)
+        sigma = max(.5, fps * .05)
+        sine = gaussian_filter1d(sine, sigma=sigma, mode='nearest', truncate=3)
+        cosine = gaussian_filter1d(cosine, sigma=sigma, mode='nearest', truncate=3)
+        angle = np.arctan2(sine, cosine)
+        # A collapsed foot heading carries no reliable roll; keep the source.
+        angle = np.where(usable & (np.hypot(sine, cosine) > 1e-6), angle, 0.)
+        world[:, middle] = Rotation.from_rotvec(shin * angle[:, None]).as_matrix() @ world[:, middle]
+    return world
 
 
 def validate(local):
@@ -147,7 +188,15 @@ def fit(rig, roots, source_world, goals, *, fps=30., surface_endpoints=None, **u
             raise ValueError('Surface roll moved a source joint')
         validate(local)
         result = after
-    return local, result, world
+    # Applied last: the surface roll solver above rebuilds the same frames.
+    world = _shin_roll(rig, world, result, fps)
+    for j, parent in enumerate(rig['parents']):
+        local[:, j] = world[:, j] if parent < 0 else world[:, parent].swapaxes(-1, -2) @ world[:, j]
+    after, world = fk(rig, roots, local)
+    if np.max(abs(after - result)) > 1e-7:
+        raise ValueError('Shin axial roll moved a source joint')
+    validate(local)
+    return local, after, world
 
 
 def policy(fps):

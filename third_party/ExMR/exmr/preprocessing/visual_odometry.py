@@ -95,13 +95,18 @@ class SimpleVO:
         for frame in tqdm(frames[1:], desc="Visual odometry", disable=not self.progress):
             prev, features = features, self._features(frame)
             pts0, pts1 = _match(prev, features)
-            matches = np.stack([np.arange(len(pts0)), np.arange(len(pts0))], axis=-1)
-            answer = pycolmap.estimate_calibrated_two_view_geometry(
-                camera, pts0.astype(np.float64), camera, pts1.astype(np.float64),
-                matches=matches, options=options,
-            )  # fmt: skip
             T_delta = np.eye(4)  # previous -> current camera
-            T_delta[:3] = answer.cam2_from_cam1.matrix().astype(np.float32)
+            # RGB MoCap: a dark or covered camera gives frames without usable
+            # features. Two-view geometry cannot solve those, and it used to
+            # fail the whole take; the camera keeps its last pose for the pair
+            # and the motion resumes once the picture has features again.
+            if len(pts0) >= options.min_num_inliers:
+                matches = np.stack([np.arange(len(pts0)), np.arange(len(pts0))], axis=-1)
+                answer = pycolmap.estimate_calibrated_two_view_geometry(
+                    camera, pts0.astype(np.float64), camera, pts1.astype(np.float64),
+                    matches=matches, options=options,
+                )  # fmt: skip
+                T_delta[:3] = answer.cam2_from_cam1.matrix().astype(np.float32)
             T_w2c.append(T_delta @ T_w2c[-1])
 
         return _interpolate_poses(T_w2c, sample_idxs)
@@ -116,6 +121,11 @@ def _match(features0, features1):
     """FLANN matches of two images' SIFT features with Lowe's ratio test -> (N, 2), (N, 2)
     float32 points."""
     (kp0, des0), (kp1, des1) = features0, features1
+    # RGB MoCap: SIFT returns no descriptors for a featureless image, and FLANN
+    # rejects them ("Unsupported format or combination of formats"); such a
+    # frame simply has no matches.
+    if des0 is None or des1 is None or not len(des0) or not len(des1):
+        return np.zeros((0, 2), np.float32), np.zeros((0, 2), np.float32)
     flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))  # KD-tree
     good = [m for m, n in flann.knnMatch(des0, des1, k=2) if m.distance < 0.7 * n.distance]
     pts0 = np.float32([kp0[m.queryIdx].pt for m in good]).reshape(-1, 2)

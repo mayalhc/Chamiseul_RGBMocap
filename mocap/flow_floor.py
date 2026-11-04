@@ -9,8 +9,16 @@ def resolve(root,options):
     from .flow_correction import motion_geometry
     from .correction import prepare_contacts
     from .people_store import read_people_json
-    context=inputs(root);height=options['floor'];samples=0;warning=''
-    if options['auto_floor']:
+    context=inputs(root);height=options['floor'];samples=0;warning='';board=None
+    method='One common SMPL-H plane; equal-actor median of original sole estimates'
+    if options.get('floor_board'):
+        from .floor_board import scene_floor as measure
+        measured,board=measure(root,context)
+        if measured is None:warning='No readable floor reference board in the scene video; the floor was inferred from foot contacts.'
+        else:
+            height=float(measured)
+            method='One common plane measured from the floor reference board in the scene video'
+    if options['auto_floor'] and board is None:
         rows=context['actors'];budget=max(2,min(512,8192//max(1,len(rows))));estimates={}
         for row in rows:
             project=safe_child(root,row['project']);params,geometry,roots,quats,confidence=motion_geometry(project)
@@ -26,6 +34,7 @@ def resolve(root,options):
         if not estimates:warning='No reliable ground samples. Shared reference floor 0 m is used; adjust it manually if needed.'
     if inputs(root)!=context or read_config(root)!=options:raise ValueError('Shared floor changed; Apply Correction again.')
     record=dict(version=VERSION,options=options,inputs=context,floor=float(height),samples=samples,warning=warning,
-        signature=signature(options,context,height),method='One common SMPL-H plane; equal-actor median of original sole estimates')
+        signature=signature(options,context,height),method=method)
+    if board is not None:record['floor_board']=board
     atomic_json(root/'scene_floor_resolved.json',record)
     return record

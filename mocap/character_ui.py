@@ -70,13 +70,25 @@ class CharacterWorkspace:
         key=item.data(Qt.UserRole) if item else None
         return next((c for c in getattr(self,'characters',[]) if key=='character:'+c['id']),None)
 
-    def export_character(self,c):
+    def export_character_from_menu(self,default_format='fbx'):
+        """File > Export Character: the selected row, or the only retargeted one."""
+        if self.busy:return
+        c=self.selected_character()
+        if c is None or not c.get('takes'):
+            exportable=[row for row in getattr(self,'characters',[]) if row.get('takes')]
+            c=exportable[0] if len(exportable)==1 else None
+        if c is None:
+            self.status.setText('Select a retargeted character in the People list, then export it again.')
+            return
+        self.export_character(c,default_format)
+
+    def export_character(self,c,default_format='fbx'):
         if not c.get('takes') or self.busy:return
         if c.get('needs_retarget'):
             self.status.setText('Character motion is out of date. Apply Correction or retarget it again.');return
         from .person_names import export_stem
         from .character_export_dialog import CharacterExportDialog
-        dialog=CharacterExportDialog(c['kind'],self)
+        dialog=CharacterExportDialog(c['kind'],self,default_format)
         accepted=dialog.exec();options=dialog.options();dialog.deleteLater()
         if not accepted:return
         extension=options['format'];label=extension.upper()
@@ -123,7 +135,7 @@ class CharacterWorkspace:
         self.sync_characters()
         if len(self.characters)>=8:
             QMessageBox.information(self,'Import Character','Up to 8 characters are supported per project.');return
-        name,_=QFileDialog.getOpenFileName(self,'Import Character','','Humanoid characters (*.fbx *.vrm *.pmx)')
+        name,_=QFileDialog.getOpenFileName(self,'Import Character','','Humanoid characters (*.fbx *.glb *.gltf *.vrm *.pmx)')
         if not name:return
         ident=uuid.uuid4().hex
         self.start_character_job(dict(mode='import',file=name,output=str(self.character_path(ident+'/asset')),id=ident))
@@ -137,11 +149,15 @@ class CharacterWorkspace:
         else:people=[]
         result=[]
         for p in people:
+            entries=p.get('takes',[])
+            paths=[safe_child(self.people_root,t['project']) if self.people_state else Path(t['project']) for t in entries]
+            # A selected variant without a committed preview must not hide the
+            # source motion a character can be retargeted to.
+            kind=self.displayable_result(paths[0]) if paths else self.displayable_result()
             takes=[]
-            for t in p.get('takes',[]):
-                path=safe_child(self.people_root,t['project']) if self.people_state else Path(t['project'])
-                metadata=path/(self.active_result+'_mixamo.json')
-                if not metadata.is_file() or not result_is_current(path,self.active_result):continue
+            for path in paths:
+                metadata=path/(kind+'_mixamo.json')
+                if not metadata.is_file() or not result_is_current(path,kind):continue
                 manifest=json.loads((path/'project.json').read_text(encoding='utf8'))
                 start=float(manifest.get('start',0.))
                 # Preview scene's stored camera transform is the authoritative shared world.
@@ -150,9 +166,8 @@ class CharacterWorkspace:
                     st=self.scene_data.by_project.get(path.resolve())
                     if st is not None:transform=st.transform.tolist()
                 takes.append(dict(project=str(path),start=start,transform=transform))
-            if takes:result.append(dict(name=p['name'],takes=sorted(takes,key=lambda t:t['start'])))
+            if takes:result.append(dict(name=p['name'],kind=kind,takes=sorted(takes,key=lambda t:t['start'])))
         return result
-
     def character_menu(self,ident,position):
         if self.busy:return
         c=next((c for c in self.characters if 'character:'+c['id']==ident),None)
@@ -205,13 +220,15 @@ class CharacterWorkspace:
 
     def retarget_character(self,c,source):
         if self.busy or self.contact_saving:return
-        if self.active_result.startswith('corrected_') and self.current_export() is None:
+        takes=source.get('takes') or []
+        if not takes:return
+        kind=source.get('kind') or self.displayable_result()
+        if kind.startswith('corrected_') and self.current_export(kind,Path(takes[0]['project'])) is None:
             self.status.setText('Apply contact changes before retargeting.');return
         folder=c['id']+'/animation-'+uuid.uuid4().hex
         job=dict(mode='retarget',output=str(self.character_path(folder)),asset=str(self.character_path(c['asset'])),id=c['id'],
-                 animation=folder,result=self.active_result,source_name=source['name'],takes=source['takes'])
+                 animation=folder,result=kind,source_name=source['name'],takes=takes)
         self.start_character_job(job)
-
     def prepare_character_refresh(self,jobs):
         from .retarget.refresh import correction_refreshes
         self.character_refresh_queue=correction_refreshes(self.characters,jobs,self.project)
@@ -238,7 +255,7 @@ class CharacterWorkspace:
             if job['mode']!='adopt':blender()
             path=self.character_root/'characters'/('job-'+uuid.uuid4().hex+'.json');atomic_json(path,job)
             args=['--request',str(path)]
-            if job['mode']=='retarget':args+=['--project',job['takes'][0]['project']]
+            if job['mode'] in {'retarget','solve'}:args+=['--project',job['takes'][0]['project']]
             cmd=command(ROOT,'character',args,frozen=getattr(sys,'frozen',False))
         except Exception as exc:
             self.character_refresh_queue=[]
@@ -291,6 +308,18 @@ class CharacterWorkspace:
                 c.pop('_starts',None)
                 c.pop('needs_retarget',None)
                 c.update(animation=job['animation'],takes=result['takes'],source_name=result['source_name'],result=result['result'])
+            elif job['mode']=='liverig':
+                shutil.rmtree(job['output'],ignore_errors=True)
+                self.__dict__.setdefault('_live_characters',{}).pop(job['id'],None)
+                self.__dict__.setdefault('_rig_ready',{}).pop(job['id'],None)
+            elif job['mode']=='solve':
+                c=next((c for c in self.characters if c['id']==job['id']),None)
+                if c is not None:
+                    old=c.get('follow')
+                    c['follow']=dict(animation=job['animation'],takes=result['takes'],source_name=result['source_name'],result=result['result'])
+                    if old and old.get('animation')!=job['animation']:
+                        shutil.rmtree(self.character_path(old['animation']),ignore_errors=True)
+                    self.save_characters()
             if job['mode'] in {'import','retarget'}:
                 self.save_characters();self.request_character(c);self.append_character_rows()
             self.status.setText(f'Character ready · {result["seconds"]:.1f}s');self.progress.setRange(0,100);self.progress.setValue(100)
@@ -301,6 +330,8 @@ class CharacterWorkspace:
         self.task_info.setText('');self.update_readiness();self.motion_view.update()
         if job.get('refresh_label'):
             self.next_character_refresh()
+        if job['mode'] in {'import','liverig'} and getattr(self,'live_channel',None) is not None:
+            self.prepare_live_characters()
 
     def cancel_character(self):
         p=self.character_process
@@ -324,11 +355,266 @@ class CharacterWorkspace:
             self.motion_view._camera_initialized=True
         self.motion_view.update()
 
-    def character_draws(self):
+    def character_live_take(self):
+        """The character take on screen, for the live link (path, frame, matrix)."""
         from bisect import bisect_right
+        time_ = self.motion_view.scene_time
+        for char in self.characters:
+            if not char.get('visible', True):
+                continue
+            path = self.character_path(char['asset'])
+            frame = 0
+            transform = None
+            if char.get('takes'):
+                starts = char.setdefault('_starts', [t['start'] for t in char['takes']])
+                index = bisect_right(starts, time_) - 1
+                take = char['takes'][index] if index >= 0 else None
+                if take is not None and time_ >= take['start'] + take['frames'] / take['fps']:
+                    take = None
+                if take is None:
+                    continue
+                path = self.character_path(char['animation'] + '/' + take['folder'])
+                frame = int((time_ - take['start']) * take['fps'] + 1e-6)
+                transform = take.get('transform')
+            data = self.character_assets.get(str(path))
+            if not data:
+                self.character_loader.request(path, frame, self.character_path(char['asset']))
+                continue
+            matrix = self.character_loader.frame(path, frame)
+            if matrix is None:
+                continue
+            return char, path, frame, transform, matrix
+        return None
+
+    def character_live_info(self, path):
+        """Rest file and bone palette behind a character take, read once."""
+        cache = getattr(self, '_live_character_cache', None)
+        if cache is None:
+            cache = self._live_character_cache = {}
+        key = str(path)
+        if key in cache:
+            return cache[key]
+        import json
+        info = None
+        try:
+            bake = json.loads((path / 'bake.json').read_text(encoding='utf-8'))
+            kind = json.loads((path / 'import.json').read_text(encoding='utf-8'))['kind']
+            rig_path = path / f'{kind}-rig.json'
+            rig = json.loads(rig_path.read_text(encoding='utf-8')) if rig_path.is_file() else {}
+            import numpy as np
+            with np.load(path / 'preview.npz') as preview:
+                vertices = preview['vertices']
+            # The app draws this character in metres; the rest file may keep its
+            # importer's units, so the live link sends the height to scale by.
+            height = float(vertices[:, 1].max() - vertices[:, 1].min())
+            info = dict(blend=path / f'{kind}-rest.blend', palette=sorted(bake['keyed_bones']),
+                        armature=rig.get('armature', 'Armature'), kind=kind, height=height)
+            if not info['blend'].is_file():
+                raise FileNotFoundError(str(info['blend']))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self.log.append('Live link: cannot describe character: ' + str(error))
+            info = None
+        cache[key] = info
+        return info
+
+    # -- live puppeteering ---------------------------------------------------
+    # An imported character is the live view's model: each solved frame poses
+    # it directly (live_character.py). There are no keys and nothing is baked.
+    def live_character(self,c,source=None):
+        """The numpy rig that poses character ``c`` live, or None until it exists."""
+        if source is None:source=getattr(self,'_live_source_rest',None)
+        if source is None:return None
+        cache=self.__dict__.setdefault('_live_characters',{})
+        if c['id'] in cache and cache[c['id']] is not None and getattr(cache[c['id']],'source_key',None)!=hash(np.asarray(source).tobytes()):cache.pop(c['id'])
+        if c['id'] in cache:return cache[c['id']]
+        from .live_character import LiveCharacter,rig_file
+        asset=self.character_path(c['asset'])
+        if not rig_file(asset).is_file():return None
+        try:
+            cache[c['id']]=LiveCharacter(asset,source);cache[c['id']].source_key=hash(np.asarray(source).tobytes())
+        except (OSError,ValueError,KeyError) as error:
+            self.log.append('Live character '+c['name']+': '+str(error));cache[c['id']]=None
+        return cache[c['id']]
+
+    def prepare_live_characters(self):
+        """Write the live rig of a visible character that lacks one (a one-off
+        read of its bones, not an animation); characters imported now have it."""
+        if self.busy or self.character_process is not None:return
+        tried=self.__dict__.setdefault('_live_rig_tried',set())
+        from .live_character import rig_current
+        for c in getattr(self,'characters',[]):
+            if not c.get('visible',True) or c['id'] in tried:continue
+            asset=self.character_path(c['asset'])
+            if rig_current(asset):continue
+            tried.add(c['id'])
+            self.start_character_job(dict(mode='liverig',output=str(self.character_path('liverig-'+uuid.uuid4().hex)),
+                asset=str(asset),id=c['id'],name=c['name']))
+            return
+
+    def update_live_characters(self,row):
+        """Pose every visible character from one live (52, 4, 4) rig row."""
+        if not getattr(self,'follow_source',False):
+            self.live_character_poses={};return {}
+        poses={}
+        serial=getattr(self,'_live_pose_serial',0)+1;self._live_pose_serial=serial
+        for c in getattr(self,'characters',[]):
+            if not c.get('visible',True):continue
+            live=self.live_character(c)
+            if live is not None:poses[c['id']]=(serial,live.pose(row))
+        self.live_character_poses=poses
+        return poses
+
+    def clear_live_characters(self):
+        self._direct_poses={};self.live_character_poses={};self._live_characters={};self._live_source_rest=None
+
+    def rest_bone_row(self,c,transform):
+        """Skeleton of a character that is not driven by a person: its rest bones."""
+        cache=self.__dict__.setdefault('_rest_bones',{})
+        if c['id'] not in cache:
+            from .live_character import rig_file
+            file=rig_file(self.character_path(c['asset']))
+            try:
+                with np.load(file,allow_pickle=False) as data:cache[c['id']]=(data['head'].astype(float),data['parents'].astype(int))
+            except (OSError,ValueError,KeyError):cache[c['id']]=None
+        if cache[c['id']] is not None:
+            self.__dict__.setdefault('character_bone_rows',{})[c['id']]=(cache[c['id']][0],cache[c['id']][1],transform)
+
+    def source_pose(self):
+        """(rig row, rest, stamp, transform) of the person the view shows now.
+
+        Characters are posed straight from it at the timeline's frame, the same
+        row the bone overlay draws: moving the playhead moves the character,
+        and nothing is keyed or baked.
+        """
+        view=self.motion_view
+        try:
+            if view.people_mode and view.people_scene is not None:
+                actors=view.scene_actors()
+                if not actors:return None
+                take,frame=next((a for a in actors if a[0].ident==getattr(self,'active_person_id',None)),actors[0])
+                asset=take.target_asset;rig=take.arrays.get('rig')
+                if not asset or 'bones' not in asset or 'rest' not in asset['bones'] or rig is None:return None
+                row=np.asarray(rig[frame]);stamp=(take.ident,frame)
+                return row,asset['bones']['rest'],(stamp,hash(row.tobytes())),take.transform,str(take.project)
+            if view.joints is not None and view.target_asset and 'bones' in view.target_asset                     and 'rest' in view.target_asset['bones'] and view.target_frames is not None:
+                row=np.asarray(view.target_frames[view.index])
+                return row,view.target_asset['bones']['rest'],(('single',view.index),hash(row.tobytes())),None,str(self.project) if self.project else None
+        except (AttributeError,KeyError,IndexError,TypeError):return None
+        return None
+
+    def rig_ready(self,c):
+        cache=self.__dict__.setdefault('_rig_ready',{})
+        if c['id'] not in cache:
+            from .live_character import rig_current
+            cache[c['id']]=rig_current(self.character_path(c['asset']))
+        return cache[c['id']]
+
+    @staticmethod
+    def same_path(a,b):
+        return bool(a) and bool(b) and os.path.normcase(os.path.realpath(a))==os.path.normcase(os.path.realpath(b))
+
+    def follow_take(self,c,project):
+        """The solved retarget of ``c`` for this source, while its source is unchanged."""
+        follow=c.get('follow')
+        take=next((t for t in follow['takes'] if self.same_path(t.get('source'),project)),None) if follow and project else None
+        if take is None:return None
+        checks=self.__dict__.setdefault('_follow_checks',{});key=(c['id'],follow['animation'],take['folder'])
+        seen=checks.get(key);now=time.monotonic()
+        if seen and now-seen[0]<1.0:return take if seen[1] else None
+        ok=True
+        try:
+            receipt=json.loads((self.character_path(follow['animation']+'/'+take['folder'])/'receipt.json').read_text(encoding='utf8'))
+            for path,(size,stamp) in receipt['source_stats'].items():
+                info=os.stat(path)
+                if info.st_size!=size or info.st_mtime_ns!=stamp:ok=False;break
+        except (OSError,ValueError,KeyError,TypeError):ok=False
+        checks[key]=(now,ok)
+        return take if ok else None
+
+    def follow_arrays(self,c,take):
+        cache=self.__dict__.setdefault('_follow_arrays',{})
+        path=self.character_path(c['follow']['animation']+'/'+take['folder']+'/solve.npz')
+        if str(path) not in cache:
+            with np.load(path,allow_pickle=False) as data:cache[str(path)]={k:data[k] for k in data.files}
+        return cache[str(path)]
+
+    def ensure_follow_solves(self):
+        """Solve the retarget for the shown source (Blender-free, no bake) when
+        a character has none yet; the viewport copies the person meanwhile."""
+        project=getattr(self,'_follow_project',None)
+        if not project or self.busy or self.character_process is not None:return
+        tried=self.__dict__.setdefault('_follow_tried',set())
+        for c in self.characters:
+            if not c.get('visible',True) or not self.rig_ready(c) or self.follow_take(c,project) is not None:continue
+            source=next((s for s in self.character_sources() if any(self.same_path(t['project'],project) for t in s['takes'])),None)
+            if source is None:continue
+            kind=source.get('kind') or self.displayable_result()
+            if kind.startswith('corrected_') and self.current_export(kind,Path(project)) is None:continue
+            try:stamp=(Path(project)/(kind+'_mixamo.json')).stat().st_mtime_ns
+            except OSError:continue
+            key=(c['id'],project,stamp)
+            if key in tried:continue
+            tried.add(key)
+            folder=c['id']+'/follow-'+uuid.uuid4().hex
+            self.start_character_job(dict(mode='solve',output=str(self.character_path(folder)),asset=str(self.character_path(c['asset'])),
+                id=c['id'],animation=folder,result=kind,source_name=source['name'],takes=source['takes']))
+            return
+
+    def direct_draws(self,source):
+        row,rest,stamp,transform,project=source
+        cache=self.__dict__.setdefault('_direct_poses',{})
+        self._follow_project=project
         time_=self.motion_view.scene_time
         for c in self.characters:
             if not c.get('visible',True):continue
+            live=self.live_character(c,rest)
+            if live is None:
+                QTimer.singleShot(0,self.prepare_live_characters);continue
+            path=self.character_path(c['asset']);data=self.character_assets.get(str(path))
+            if not data:self.character_loader.request(path,0,path);continue
+            take=self.follow_take(c,project) if self.rig_ready(c) else None
+            if take is not None:
+                frame=int((time_-take['start'])*take['fps']+1e-6)
+                if not 0<=frame<take['frames']:continue
+                key=(('solved',c['follow']['animation'],take['folder'],frame),)
+                held=cache.get(c['id'])
+                if held is None or held[0]!=key:
+                    arrays=self.follow_arrays(c,take)
+                    extra={int(b):arrays['finger_world'][frame,k] for k,b in enumerate(arrays['finger_bones'])}
+                    self._live_pose_serial=getattr(self,'_live_pose_serial',0)+1
+                    held=cache[c['id']]=(key,live.pose_solved(arrays['world'][frame],arrays['root'][frame],extra),self._live_pose_serial)
+                self.__dict__.setdefault('character_bone_rows',{})[c['id']]=(live.positions,live.parents,transform)
+                yield c,data,held[1],held[2],transform
+                continue
+            if self.rig_ready(c):QTimer.singleShot(0,self.ensure_follow_solves)
+            else:QTimer.singleShot(0,self.prepare_live_characters)
+            held=cache.get(c['id'])
+            if held is None or held[0]!=stamp:
+                self._live_pose_serial=getattr(self,'_live_pose_serial',0)+1
+                held=cache[c['id']]=(stamp,live.pose(row),self._live_pose_serial)
+            self.__dict__.setdefault('character_bone_rows',{})[c['id']]=(live.positions,live.parents,transform)
+            yield c,data,held[1],held[2],transform
+
+    def character_draws(self):
+        from bisect import bisect_right
+        time_=self.motion_view.scene_time
+        follow=getattr(self,'follow_source',False)
+        if follow and getattr(self,'live_channel',None) is None:
+            source=self.source_pose()
+            if source is not None:
+                drawn=list(self.direct_draws(source))
+                if drawn:
+                    yield from drawn
+                    return
+        live=getattr(self,'live_character_poses',None) if follow and getattr(self,'live_channel',None) is not None else None
+        for c in self.characters:
+            if not c.get('visible',True):continue
+            if live and c['id'] in live:
+                serial,matrix=live[c['id']];path=self.character_path(c['asset']);data=self.character_assets.get(str(path))
+                if not data:self.character_loader.request(path,0,path);continue
+                lc=self.live_character(c)
+                if lc is not None:self.__dict__.setdefault('character_bone_rows',{})[c['id']]=(lc.positions,lc.parents,None)
+                yield c,data,matrix,serial,None;continue
             path=self.character_path(c['asset']);frame=0;transform=None
             if c.get('takes'):
                 starts=c.setdefault('_starts',[t['start'] for t in c['takes']])
@@ -341,4 +627,5 @@ class CharacterWorkspace:
             if not data:
                 self.character_loader.request(path,frame,self.character_path(c['asset']));continue
             matrix=self.character_loader.frame(path,frame)
-            if matrix is not None:yield c,data,matrix,frame,transform
+            if matrix is not None:
+                self.rest_bone_row(c,transform);yield c,data,matrix,frame,transform

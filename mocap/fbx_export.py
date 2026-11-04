@@ -34,10 +34,25 @@ def run(request, emit=lambda *a, **k:None):
             if scene is not None and context(scene['root'],project)!=scene:raise ValueError('Scene placement changed. Export again.')
             temporary=target.with_name('.'+target.name+'.rgbmocap-'+request.stem+'.partial')
             staged.append((temporary,target,project,kind,paths,stamps,scene))
+            body=('skin_vertices','skin_normals','skin_faces','skin_bones','skin_weights','skin_offsets','skin_bind')
             with np.load(project/info['asset_file'],allow_pickle=False) as data:
-                needed=('parents','fbx_rest','fbx_rest_frames','fbx_display_frames','fbx_tip_local')
+                needed=('parents','fbx_rest','fbx_rest_frames','fbx_display_frames','fbx_tip_local',
+                        'packed','faces','vertex_count')
                 if not all(k in data for k in needed):raise ValueError('FBX rest pose is unavailable. Use Prepare Preview first.')
                 a={k:data[k] for k in needed}
+                b={k:data[k] for k in body} if all(k in data for k in body) else None
+            if b is not None:
+                # The displayed body surface, skinned to the export skeleton.
+                skin=dict(vertices=b['skin_vertices'],normals=b['skin_normals'],faces=b['skin_faces'],
+                          bones=b['skin_bones'],weights=b['skin_weights'],offsets=b['skin_offsets'],
+                          bind=b['skin_bind'])
+            else:
+                packed=a['packed']
+                faces=a['faces']
+                if (packed.ndim!=2 or packed.shape[1]!=7 or faces.ndim!=2 or faces.shape[1]!=3
+                        or int(a['vertex_count'])!=len(packed) or faces.max()>=len(packed)):
+                    raise ValueError('Invalid display geometry. Use Prepare Preview first.')
+                skin=dict(vertices=packed[:,:3],normals=packed[:,3:6],faces=faces,bones=packed[:,6].astype(np.int32))
             frames=np.load(project/info['frames_file'],mmap_mode='r',allow_pickle=False)
             try:
                 def progress(done,total):
@@ -45,7 +60,7 @@ def run(request, emit=lambda *a, **k:None):
                 write(temporary,info['names'],a['parents'],a['fbx_rest'],a['fbx_rest_frames'],
                       a['fbx_display_frames'],a['fbx_tip_local'],frames,info['fps'],
                       transform=None if scene is None else scene['transform'],progress=progress,
-                      rig_name=row.get('rig_name','SourceAnimation'),prepend_tpose=row.get('prepend_tpose',False))
+                      rig_name=row.get('rig_name','SourceAnimation'),skin=skin,prepend_tpose=row.get('prepend_tpose',False))
             finally:frames._mmap.close()
         for _,_,project,kind,paths,stamps,scene in staged:
             if [file_stat(p) for p in paths]!=stamps or selected_export(project,kind)!=paths[1]:

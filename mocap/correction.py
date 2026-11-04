@@ -588,11 +588,22 @@ def run(project,emit,result):
     transform=np.asarray(shared['local_to_shared']) if shared else np.eye(4)
     shared_rotation,shared_translation=transform[:3,:3],transform[:3,3]
     preset=options['preset']
-    floor=None if options.get('auto_floor',True) else float(options.get('floor',0))
+    floor=None if options.get('auto_floor',False) else float(options.get('floor',0))
     if shared:floor=float(shared['floor'])
     fps=float(manifest.get('fps',30));reports={}
     contact_source_stamp=file_stat(project/'hmr4d_results.pt')
     source=torch.load(project/'hmr4d_results.pt',map_location='cpu',weights_only=False,mmap=True)
+    board=None
+    if shared is None and options.get('floor_board'):
+        # Measured floor: the printed sheet replaces the contact-based estimate.
+        # Read it under the actor's own path, because the measured plane carries
+        # the camera's slight roll and a single floor height has to hold where
+        # the feet land, not at the world origin.
+        from .floor_board import floor_for
+        try:anchor=np.median(source['smpl_params_global']['transl'].numpy(),0)
+        except (KeyError,IndexError,AttributeError,TypeError):anchor=None
+        measured,board=floor_for(project,anchor=anchor)
+        if measured is not None:floor=float(measured)
     logits=source['net_outputs']['static_conf_logits'][0,:,:4]
     probabilities=logits.sigmoid().numpy()
     started=time.monotonic()
@@ -640,6 +651,10 @@ def run(project,emit,result):
                 report['warning']=' '.join(filter(None,(report['warning'],report['hand_lock']['warning'])))
                 report['contact_revision']=contact_revision
                 if shared:report['shared_floor']=shared
+                if board is not None:report['floor_board']=board
+                elif shared is None and options.get('floor_board'):
+                    report['warning']=' '.join(filter(None,(report['warning'],
+                        'No readable floor reference board in this video; the floor was inferred from foot contacts.')))
                 if contact_warning:report['warning']=' '.join(filter(None,(report['warning'],contact_warning)))
                 pose=array('pose',(n,22,3));translation=array('translation',(n,3))
                 after=array('after-sole',(n,4,3))

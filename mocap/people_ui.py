@@ -3,12 +3,14 @@ from __future__ import annotations
 from .tooltips import tooltip_text
 from .ui_refresh import batch_readiness
 import json
+import math
+import time
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QRect, Signal, QPersistentModelIndex, QEvent
+from PySide6.QtCore import Qt, QSize, QRect, Signal, QPersistentModelIndex, QEvent, QTimer
 from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter, QPen
-from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
+from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QSlider,
     QListWidget,QListWidgetItem,QColorDialog,QComboBox,QFileDialog,
     QStyledItemDelegate,QStyleOptionViewItem,QToolTip,QStyle,QMenu,QInputDialog,QMessageBox)
 
@@ -141,8 +143,9 @@ class PeopleWorkspace:
 
     def request_people_scene(self,force=False):
         if self.people_root is None:return
-        from .motion_tools import base_result
-        kind=self.active_result
+        # A selected variant without a committed preview resolves to the same
+        # stack without it, so one unchecked option cannot remove every actor.
+        kind=self.displayable_result(ignore_contacts=True)
         key=(str(self.people_root),kind)
         if key==self._scene_key and not force:return
         if self._scene_key and self.scene_data:
@@ -184,13 +187,17 @@ class PeopleWorkspace:
         from .scene_floor import ensure_config,current_resolution
         options=ensure_config(self.people_root);resolved=current_resolution(self.people_root)
         self.auto_floor.blockSignals(True);self.floor_height.blockSignals(True);self.correction_mode.blockSignals(True)
+        self.floor_board.blockSignals(True)
         try:
+            self.floor_board.setChecked(bool(options.get('floor_board')))
             self.auto_floor.setChecked(options['auto_floor'])
             self.correction_mode.setCurrentIndex(self.correction_mode.findData(options.get('mode','flat')))
             self.floor_height.setValue(resolved['floor'] if options['auto_floor'] and resolved else options['floor'])
         finally:
             self.auto_floor.blockSignals(False);self.floor_height.blockSignals(False);self.correction_mode.blockSignals(False)
+            self.floor_board.blockSignals(False)
         self.auto_floor.setText('Auto Scene Floor')
+        self.floor_board.setText('Measure Scene Floor (Reference Board)')
         self.floor_height_label.setText('Floor Height (Shared World Y)')
         self.floor_description.setText('Correction Floor below the viewport shows the shared plane for all people.\nHigher values raise the correction floor.\nApply Correction updates available actors.')
         if self.correction_mode.currentData()=='multi_level':self.update_correction_description()
@@ -199,6 +206,7 @@ class PeopleWorkspace:
     def apply_scene_correction(self,kind):
         """Rebuild all available actor/take corrections against one plane."""
         from .motion_tools import RESULTS,result_sources,base_result,result_is_current
+        options=self.selected_correction_options()
         jobs=[]
         for person in self.people_state['people']:
             for take in person.get('takes',[]):
@@ -209,6 +217,15 @@ class PeopleWorkspace:
                     if person.get('checked'):
                         self.status.setText(f"{person['name']}: selected base motion is unavailable. Reconstruct it first.");return
                     continue
+                # A group-wide apply uses these settings for every take, so each
+                # take's saved options must match what the GUI is showing.
+                try:
+                    path=project/'project.json';saved=json.loads(path.read_text(encoding='utf-8'))
+                    if saved.get('correction')!=options:
+                        saved['correction']=options
+                        from .storage import atomic_json
+                        atomic_json(path,saved)
+                except (OSError,ValueError,KeyError):pass
                 jobs.extend((stage,['--project',str(project),'--result',kind]) for stage in ('correct','export'))
         if not jobs:
             self.status.setText('Reconstruct a person before applying the shared scene floor.');return
@@ -293,13 +310,31 @@ class PeopleWorkspace:
         self.find_person_button.setToolTip(tooltip_text('Find people in the video so you can choose who to reconstruct. Useful for multiple people or a specific person.'))
         self.find_person_button.clicked.connect(self.find_people)
         bar.addWidget(self.find_person_button);bar.addStretch()
+        # The preview's soundtrack is this window's only sound, so its level
+        # belongs next to the video it belongs to.
+        self.mute_button = QPushButton('Mute')
+        self.mute_button.setCheckable(True)
+        self.mute_button.setToolTip(tooltip_text('Mute the preview sound. The video or link keeps playing.'))
+        self.mute_button.toggled.connect(self.toggle_preview_mute)
+        bar.addWidget(self.mute_button)
+        self.volume = QSlider(Qt.Horizontal)
+        self.volume.setRange(0, 100)
+        self.volume.setValue(100)
+        self.volume.setFixedWidth(84)
+        self.volume.setToolTip(tooltip_text('Preview volume for the video or live link sound. Exported files are unchanged.'))
+        self.volume.valueChanged.connect(self.set_preview_volume)
+        bar.addWidget(self.volume)
         movie_layout.addWidget(footer)
         layout.addWidget(movie,1)
         return body
 
     def update_people_readiness(self):
         enabled = not self.busy and not self.contact_saving
-        self.find_person_button.setEnabled(enabled and self.video_readable)
+        live = getattr(self, 'camera_session', None)
+        # A live camera never writes a file - Find person there starts the
+        # rehearsal character, it does not run the people stage on a snapshot.
+        live_ready = live is not None and live.running
+        self.find_person_button.setEnabled(enabled and (self.video_readable or live_ready))
         self.people_list.setEnabled(enabled)
         self.person_takes.setEnabled(enabled)
 
@@ -366,6 +401,60 @@ class PeopleWorkspace:
         self.people_note.setText(text)
         self.people_note.setVisible(bool(text))
 
+    def start_live_preview(self, delay=20.0):
+        """Bring the live character up, after time to step in front.
+
+        This is the rehearsal view: the 3D character follows the performer so
+        the motion can be judged before anything is recorded. The countdown
+        runs first because the performer is the one who pressed the button and
+        then walks to the camera. Nothing is captured here - Record window is
+        what produces a video and its motion.
+        """
+        live = getattr(self, 'camera_session', None)
+        if live is None or not live.running:
+            return False
+        # A link is a clip, not a person walking into frame: there is nothing
+        # to wait for, and its first frames are the only motion the character
+        # has while its model loads - so start at once.
+        link = getattr(live, 'label', '').startswith('Live link')
+        if link:
+            delay = 0.0
+        running = getattr(self, '_live_preview_timer', None)
+        if running is not None:
+            running.stop()
+        deadline = time.monotonic() + delay
+        self._live_preview_timer = QTimer(self)
+        self._live_preview_timer.setInterval(250)
+
+        def tick():
+            if getattr(self, 'camera_session', None) is None:
+                self._live_preview_timer.stop()
+                self._live_preview_timer = None
+                return
+            left = deadline - time.monotonic()
+            if left <= 0:
+                self._live_preview_timer.stop()
+                self._live_preview_timer = None
+                # A failure here used to leave the countdown parked on its last
+                # second with nothing said; report it instead.
+                try:
+                    self.start_live_body()
+                except Exception as error:
+                    self.status.setText('Live character failed: ' + str(error)[:160])
+                else:
+                    self.status.setText('Live character is loading in the 3D view')
+                return
+            self.status.setText('Live character in %d s - step in front of the camera.'
+                                % math.ceil(left))
+        self._live_preview_timer.timeout.connect(tick)
+        self._live_preview_timer.start()
+        if link:
+            self.status.setText('Starting the character for this link...')
+        else:
+            self.status.setText('Live character in %d s - step in front of the camera.'
+                                % math.ceil(delay))
+        return True
+
     def begin_single_tracking(self,project,loading=False):
         if self.people_root is not None or project is None or self.project is None:return
         if Path(project).resolve()!=self.project.resolve():return
@@ -403,6 +492,33 @@ class PeopleWorkspace:
         self.apply_person_color()
 
         if hasattr(self,'append_character_rows'):self.append_character_rows()
+
+    def show_live_person(self,image=None):
+        """List the performer a live rehearsal is following.
+
+        A live source has no take, so nothing is discovered or tracked on disk.
+        The one row names the person the 3D view follows right now; it is
+        removed when the live source stops.
+        """
+        if self.people_root is not None:
+            return
+        self._people_syncing=True
+        try:
+            item=self.people_list.item(0) if self.people_list.count() else None
+            if item is None:
+                item=QListWidgetItem('Person 1')
+                item.setData(Qt.UserRole,1)
+                item.setData(Qt.UserRole+1,'person1')
+                self.people_list.addItem(item)
+            item.setText('Person 1')
+            item.setFlags(item.flags()&~Qt.ItemIsUserCheckable&~Qt.ItemIsEditable)
+            if image is not None:
+                item.setIcon(QIcon(QPixmap.fromImage(image)))
+            item.setToolTip(tooltip_text('Person 1 | live preview\n'
+                'The 3D character follows this performer while the live source runs.\n'
+                'Nothing is recorded here: Record window keeps a take.'))
+        finally:self._people_syncing=False
+        self.set_people_note('Live preview · following Person 1')
 
     def tracked_actor_ready(self,generation,project,key,snapshot):
         if generation!=self.data_loader.generation or self.people_root is not None or self.project!=Path(project):return
@@ -597,6 +713,32 @@ class PeopleWorkspace:
 
     def find_people(self):
         if self.busy:return
+        live = getattr(self, 'camera_session', None)
+        if live is not None and live.running:
+            # The live character now comes up with the source, so there is
+            # nothing left to start here: say where it stands instead of
+            # running another countdown over a view that is already moving.
+            # Nothing is recorded or reconstructed here - Record window is what
+            # makes a take.
+            channel = getattr(self, 'live_channel', None)
+            worker = getattr(self, 'live_worker', None)
+            # A channel whose worker exited, or one that never solved a frame,
+            # cannot be resumed: this button has to start the character again
+            # instead of reporting it as already running.
+            if channel is not None and channel.count() > 0 and (worker is None or worker.poll() is None):
+                self.status.setText('The live character is already following the source.')
+                return
+            if channel is not None:
+                # Already handed over once: the performer is in frame, so start
+                # again at once instead of running the walk-in countdown.
+                self.stop_live_body()
+                try:
+                    self.start_live_body()
+                except Exception as error:
+                    self.status.setText('Live character failed: ' + str(error)[:160])
+                return
+            self.start_live_preview()
+            return
         from .models import missing
         unavailable=missing('people')
         if unavailable:
@@ -637,11 +779,20 @@ class PeopleWorkspace:
         self._people_return_project=None
         self._people_result=result or self.active_result
         options=self.selected_correction_options()
+        if 'correct' in stages:
+            # Automatic grounding: the run that follows reconstruction always uses
+            # one shared plane, so no actor keeps its source elevation and floats.
+            # Multi Level stays available for a manual Apply Correction.
+            if options['mode']!='flat':
+                options={**options,'mode':'flat'}
+                self.use_flat_ground()
+            from .scene_floor import save_config
+            save_config(self.people_root,options)
         jobs=[]
         for person in selected:
             args=['--project',str(self.people_root),'--person-id',str(person['id']),
                 '--first-frame',str(begin),'--end-frame',str(finish),'--result',self._people_result,
-                '--correction-preset',options['preset'],'--correction-mode',options['mode'],'--foot-lock',str(int(options['foot_lock'])),'--hand-lock',str(int(options['hand_lock'])),'--pelvis-offset',str(options['pelvis_offset'])]
+                '--correction-preset',options['preset'],'--correction-mode',options['mode'],'--foot-lock',str(int(options['foot_lock'])),'--hand-lock',str(int(options['hand_lock'])),'--occlusion-fill',str(int(options['occlusion_fill'])),'--pelvis-offset',str(options['pelvis_offset'])]
             if not options['auto_floor']:args+=['--floor',str(options['floor'])]
             jobs.append(('person',args))
         self.start_jobs(jobs)
@@ -653,6 +804,8 @@ class PeopleWorkspace:
             # which person's worker, contact edits, or exports are being processed.
             inference=[stage for stage in self._people_stages if stage not in ('correct','export','flow_export')]
             post=[stage for stage in self._people_stages if stage in ('correct','export','flow_export')]
+            # A finished reconstruction gets one grounding check for the whole group.
+            if inference:self._ground_after_batch=True
             jobs=[(stage,['--project',path,'--result',self._people_result])
                   for path in event['projects'] for stage in inference]
             deferred=[(stage,['--project',path,'--result',self._people_result])
@@ -672,6 +825,9 @@ class PeopleWorkspace:
         return False
 
     def finish_people_jobs(self):
+        if getattr(self,'_ground_after_batch',False):
+            self._ground_after_batch=False
+            QTimer.singleShot(0,self.ground_scene_after_reconstruction)
         if self.people_root:self.request_people_scene(force=True)
         found=getattr(self,'_people_found_root',None)
         if found is not None:
@@ -687,6 +843,40 @@ class PeopleWorkspace:
             self.people_state=load_people(root)
             path=self._people_return_project;self._people_return_project=None
             self.activate_person(ident,path)
+
+    def ground_scene_after_reconstruction(self):
+        """Commit one flat shared floor for every checked actor.
+
+        Reconstruction can finish without a usable corrected result (correction
+        turned off, a cancelled stage, or settings changed since). Rather than
+        leaving the preview floating until a manual correction, re-run the flat
+        pass for those actors only.
+        """
+        if self.busy or self.people_root is None or not self.people_state:return
+        # An explicit opt-out of Motion Correction is respected.
+        if not self.motion_correction.isChecked():return
+        from .motion_tools import RESULTS,base_result,result_is_current,result_sources
+        from .scene_floor import ensure_config,save_config
+        options=ensure_config(self.people_root)
+        if options.get('mode','flat')!='flat':
+            save_config(self.people_root,{**options,'mode':'flat'})
+            self.sync_shared_floor_controls()
+        kind=getattr(self,'_people_result',None) or 'corrected_initial'
+        kind=kind if kind.startswith('corrected_') else 'corrected_'+base_result(kind)
+        jobs=[]
+        for person in self.people_state['people']:
+            if not person.get('checked'):continue
+            for take in person.get('takes',[]):
+                project=safe_child(self.people_root,take['project'])
+                bases=result_sources(base_result(kind))
+                if not all((project/RESULTS[base][0]).is_file() and result_is_current(project,base) for base in bases):continue
+                if result_is_current(project,kind):continue
+                jobs.extend((stage,['--project',str(project),'--result',kind]) for stage in ('correct','export'))
+        if not jobs:return
+        self._people_batch=True;self._people_return_id=self.active_person_id
+        self._people_return_project=self.project
+        self.status.setText('Grounding feet on the shared floor...')
+        self.start_jobs(jobs,refresh_characters=True)
 
     def export_checked_people(self):
         """Multiple selected people/takes export separately, without fabricated gaps."""

@@ -261,7 +261,11 @@ def prepare(project, result, emit=lambda *a, **k: None, body=None):
             from .bvh_bind import bind_pose, asset_frames
             export_binding = bind_pose(rig)
             export_probes = np.einsum('vij,vj->vi', export_binding['basis'][asset['probe_bones']].swapaxes(-1, -2), asset['probe_local'])
-            np.savez(project / files['asset_file'], packed=asset_frames(asset['packed'], export_binding), faces=asset['faces'], vertex_count=np.array(asset['vertex_count']), rest=export_binding['rest'], parents=rig['parents'], ends=export_binding['ends'], export_basis=export_binding['basis'], anatomical_calibration=rig['alignment'], probe_local=export_probes, probe_bones=asset['probe_bones'], sole_ids=asset['sole_ids'], sole_groups=asset['sole_groups'], source_regressor=np.empty((0, 0), np.float32), **fbx_binding)
+            from .fbx_bind import body_skin
+            skin = body_skin(rig, display_binding, body_data.faces,
+                             np.asarray(body_data.lbs_weights.detach().numpy(), float),
+                             export_binding['basis'], fbx_binding['fbx_display_frames'])
+            np.savez(project / files['asset_file'], packed=asset_frames(asset['packed'], export_binding), faces=asset['faces'], vertex_count=np.array(asset['vertex_count']), rest=export_binding['rest'], parents=rig['parents'], ends=export_binding['ends'], export_basis=export_binding['basis'], anatomical_calibration=rig['alignment'], probe_local=export_probes, probe_bones=asset['probe_bones'], sole_ids=asset['sole_ids'], sole_groups=asset['sole_groups'], source_regressor=np.empty((0, 0), np.float32), **fbx_binding, **skin)
             created.append(project / files['asset_file'])
             fit_summary = dict(mean_m=float(fit_errors.mean()), p95_m=float(np.quantile(fit_errors, 0.95)), max_m=float(fit_errors.max()), joints={name: dict(mean_m=float(fit_errors[:, j].mean()), p95_m=float(np.quantile(fit_errors[:, j], 0.95)), max_m=float(fit_errors[:, j].max())) for (j, name) in enumerate(rig['names'][:22])}, distal_orientation_max_deg={rig['names'][j]: float(distal_errors[:, i].max()) for (i, j) in enumerate(distals)}, comparison='Actually selected source pose vs anatomical fixed-length target')
             fit_summary['anatomical_facing_deg'] = {rig['names'][middle]:dict(mean=float(facing_errors[:,index].mean()),p95=float(np.quantile(facing_errors[:,index],.95)),max=float(facing_errors[:,index].max())) for index,(_,middle,_,_) in enumerate(HINGES)}
@@ -367,6 +371,10 @@ def prepare(project, result, emit=lambda *a, **k: None, body=None):
                 **policy(fps),
                 hinge_axis_max_error=hinge_error,rotation_orthogonality_max_error=orthogonality_error,
                 geometry='52-bone humanoid hierarchy including 30 finger channels',
+                export_mesh=dict(surface='Displayed body surface skinned to the export skeleton',
+                    vertices=int(len(skin['skin_vertices'])), polygons=int(len(skin['skin_faces'])),
+                    influences='Multi-influence cluster weights; no retargeting, no smoothing',
+                    fallback='Procedural display geometry when the body skin is unavailable'),
                 export_bind=dict(version=export_binding['bind_version'],length_unit='meter',up_axis='Y',
                     rotation_order_default='Per joint',joint_rotation_orders=dict(zip(rig['names'],bvh_encoding['orders'])),minimum_singularity_margin=bvh_encoding['minimum_singularity_margin'],
                     root_offset=export_binding['rest'][0].tolist(),root_translation='Absolute world positions for Blender BVH import',

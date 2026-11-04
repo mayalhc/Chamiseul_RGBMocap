@@ -1,5 +1,6 @@
 """Transactional import/retarget jobs. A failed job never replaces a usable character."""
 import json,os,shutil,subprocess,sys,time
+import numpy as np
 from pathlib import Path
 from mocap.storage import atomic_json
 from .runtime import blender
@@ -36,6 +37,37 @@ def main(args):
     elif job['mode']=='import':
         invoke('import',out,job['file'])
         result=json.loads((out/'import.json').read_text(encoding='utf8'))
+    elif job['mode']=='liverig':
+        report('Preparing the live rig')
+        invoke('liverig',Path(job['asset']))
+        result={}
+    elif job['mode']=='solve':
+        # The retarget's solved motion without Blender or any bake: what the
+        # viewport poses a character from when Follow Source is on.
+        from .source import prepare,stamp
+        from .pipeline import run
+        from .fingers import finger_deltas
+        asset=Path(job['asset']);kind=json.loads((asset/'import.json').read_text())['kind'];takes=[]
+        for i,take in enumerate(job['takes']):
+            folder=out/f'take-{i}';folder.mkdir()
+            report(f'Take {i+1}/{len(job["takes"])}: preparing selected source')
+            for name in [f'{kind}-rig.json',f'{kind}-canonical.npz',f'{kind}-contact-geometry.npz','import.json']:
+                shutil.copy2(asset/name,folder/name)
+            receipt=prepare(Path(take['project']),job['result'],folder)
+            report(f'Take {i+1}/{len(job["takes"])}: solving contact retargeting')
+            diagnostic=run(folder,kind)
+            report(f'Take {i+1}/{len(job["takes"])}: solving fingers')
+            fingers=finger_deltas(asset,folder,kind)
+            if stamp(map(Path,receipt['source_stats']))!=receipt['source_stats']:
+                raise RuntimeError('Source changed during retargeting. Apply your changes and retarget again.')
+            solved=np.load(folder/f'motion-{kind}-stance.npz')
+            keys=sorted(fingers)
+            np.savez(folder/'solve.npz',world=solved['world'].astype(np.float32),root=solved['root'].astype(np.float32),
+                     finger_bones=np.array(keys,np.int32),
+                     finger_world=(np.stack([fingers[k] for k in keys],1) if keys else np.zeros((len(solved['root']),0,3,3))).astype(np.float32))
+            atomic_json(folder/'receipt.json',dict(receipt,diagnostic=diagnostic))
+            takes.append(dict(folder=f'take-{i}',start=take['start'],frames=receipt['frames'],fps=receipt['fps'],transform=take.get('transform'),source=take['project']))
+        result=dict(takes=takes,source_name=job['source_name'],result=job['result'])
     elif job['mode']=='export':
         for i,(take,target) in enumerate(zip(job['takes'],job['files'])):
             report(f'Exporting character take {i+1}/{len(job["takes"])}')

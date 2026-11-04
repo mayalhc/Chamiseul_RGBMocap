@@ -15,6 +15,13 @@ animated fingers. Standard correction, retargeting and FBX controls apply.
 
 ## Character retargeting
 
+**Follow Source** (Display row, off by default). With it on, an imported character
+follows the person shown in the 3D view as you play or scrub. The first time, the
+app solves the same contact-aware retarget that **Retarget** uses, without Blender
+and without baking or keys (a few seconds); until it is ready the character copies
+the person's pose. The solved pose matches the baked Retarget mesh. Export always
+uses **Retarget**. In a live camera or link, the character copies the performer.
+
 Transfer a reconstructed person's motion to a character without running AI
 inference again. Supported targets are **Mixamo FBX**, **VRM** and **PMX** humanoids.
 
@@ -219,6 +226,15 @@ need additional space. Earlier optional setup reports of 6.19 GiB (MAMMA) and
 6.32 GiB (PromptHMR) included generated files excluded from this cache-free
 inventory. See [MAMMA](MAMMA.md) and [PromptHMR](models/PROMPTHMR.md) for setup
 scope. No clean-Windows or other-GPU installation test is claimed.
+
+
+Files that need a free account (MAMMA, SMPL-X, SMPL, MANO and similar) register
+themselves: in the model row choose **Manual Download...** then **Open Download
+Page & Auto-Import**. Sign in and download in your own browser. While that window
+is open the app watches your Downloads folder; when the expected file (or an
+archive containing it, such as the SMPL-X locked-head ZIP) finishes, it is checked
+like a normal Import, stored in the models folder and removed from Downloads.
+Only files a model row expects are touched.
 
 ## Storage and cleanup
 
@@ -673,6 +689,52 @@ frame rate and axes. **Armature Data → Rest Position** shows the rest pose.
 The first frame in **Pose Position** shows animation, which can differ from rest.
 Use the character workflow above for supported humanoids, or retarget the source
 FBX in your animation software.
+
+## Webcam live
+
+**File → Webcam live...** opens the webcam dialog: pick the camera, size,
+frame rate, rotation and the window length, then **Start live**. The video
+panel shows the camera immediately. Nothing is recorded at this point: live
+is the rehearsal view. An orange box follows you as soon as the camera sees
+you (a detector runs on its own, so it does not wait for the 3D model).
+
+Press **Find person** next. It counts down 20 seconds - time to walk in front
+of the camera - and then starts the live character in the 3D view, which
+follows you so you can judge whether the motion comes through before anything
+is captured. The character is drawn as the rig skeleton (the same bone overlay
+a take shows) and mirrors the performer frame by frame; the timeline stays
+where it is and no frame is stored. The first start loads the 3D solver (a few
+minutes, once per session); after that the character follows at a live rate.
+
+**Rotation** turns the capture upright: stand the camera on its side for a
+portrait picture (the person fills the frame at desk distance) and pick the
+90° that levels the picture. The video view, the recorded windows all follow
+the setting.
+
+The live view writes no file and runs no reconstruction. **● Record window**
+captures one window (the length chosen in the dialog, default 10 s), and that
+press is what produces a take: the clip is loaded and its motion is
+reconstructed straight away. The panel then returns to the live camera, so
+you can keep performing and record the next window when you are ready. The
+live character keeps following while a window records.
+- **■ Stop live** ends the camera, the live character, the tracking box and
+  the solver.
+- In the dialog, *Keep taking windows (near-live)* records one window after
+  another into the list below; with *Load each finished window automatically*
+  each one is loaded into the workspace as it finishes, so the next window
+  records while the last one processes. Without it, the windows stay in
+  `cache/webcam/` — open one from the list or load it later like any video.
+
+One camera open at a time: recording takes the camera from the live view, and
+the app reopens it after the driver releases it (a couple of seconds). The
+live character is a fast preview (fixed-bone skeleton, smoothed); the
+reconstruction of a recorded window is the full-quality take, and
+**File → Live Link to Cascadeur** streams a reconstructed take like any other.
+It works on a plain skeleton and on a character in Rig Mode (Quick Rigging):
+a rigged character is driven through its rig points, because the rig undoes
+any rotation written straight onto its joints. The rig's rest is taken from
+the first frame of the scene the first time the link binds, so link a rigged
+character before animating it.
 
 ### Preview video
 

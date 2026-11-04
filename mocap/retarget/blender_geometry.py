@@ -11,7 +11,7 @@ def register(OUT,kind,rig,arm,mapping,rest):
   parent=b
   while parent and parent.name not in mapped:parent=parent.parent
   bone_map[b.name]=mapped[parent.name] if parent else 0
- vertices=[];weights=[];wrist_weights=[];mesh_names=[];mesh_counts=[]
+ vertices=[];weights=[];wrist_weights=[];normalized_wrist_weights=[];mesh_names=[];mesh_counts=[]
  for obj in bpy.context.scene.objects:
   if obj.type!='MESH':continue
   mesh_names.append(obj.name);mesh_counts.append(len(obj.data.vertices))
@@ -24,8 +24,8 @@ def register(OUT,kind,rig,arm,mapping,rest):
     if name in bone_map:w[vertex.index,bone_map[name]]+=group.weight
     for h in [0,1]:
      if name==mapping[20+h]:hw[vertex.index,h]+=group.weight
-  total=w.sum(1);missing=total<1e-8;w[missing,0]=1.;w/=np.maximum(w.sum(1,keepdims=True),1e-8);weights.append(w);wrist_weights.append(hw)
- v=np.concatenate(vertices);W=np.concatenate(weights);HW=np.concatenate(wrist_weights);height=float(rest[:,1].max()-rest[:,1].min());payload=dict(rest=rest,mesh_names=mesh_names,mesh_counts=mesh_counts)
+  total=w.sum(1);missing=total<1e-8;w[missing,0]=1.;w/=np.maximum(w.sum(1,keepdims=True),1e-8);weights.append(w);wrist_weights.append(hw);normalized_wrist_weights.append(w[:,[20,21]])
+ v=np.concatenate(vertices);W=np.concatenate(weights);HW=np.concatenate(wrist_weights);NW=np.concatenate(normalized_wrist_weights);height=float(rest[:,1].max()-rest[:,1].min());payload=dict(rest=rest,mesh_names=mesh_names,mesh_counts=mesh_counts)
  counts=[]
  for side in [0,1]:
   foot=7+side;toe=10+side;shin=4+side;p=rest[foot];length=np.linalg.norm(rest[toe]-p);leg=np.linalg.norm(rest[foot]-rest[shin])+np.linalg.norm(rest[shin]-rest[1+side])
@@ -41,9 +41,13 @@ def register(OUT,kind,rig,arm,mapping,rest):
   wrist=20+side;finger=[b for b in arm.data.bones if b.name.startswith(mapping[wrist]) and b.name!=mapping[wrist]]
   # Registered palm region excludes finger-dominant vertices.
   palm_length=max(.025,float(np.median([np.linalg.norm(np.array(arm.matrix_world@b.head_local)@A-rest[wrist]) for b in finger if np.linalg.norm(np.array(arm.matrix_world@b.head_local)@A-rest[wrist])>.015])) if finger else .055)
-  hand_dist=np.linalg.norm(v-rest[wrist],axis=1)
-  hand_ids=np.flatnonzero((HW[:,side]>.95)&(hand_dist>palm_length*.15)&(hand_dist<min(palm_length*1.1,.14*height)))
+  hand_dist=np.linalg.norm(v-rest[wrist],axis=1);inner=(hand_dist>palm_length*.15)&(hand_dist<min(palm_length*1.1,.14*height))
+  # Rigid palms register directly. Smoothly skinned palms blend the hand with
+  # finger bones, so their raw hand weight stays low; they clear the same
+  # threshold once weighted the way the skin is.
+  hand_ids=np.flatnonzero((HW[:,side]>.95)&inner)
   if len(hand_ids)<8:hand_ids=np.flatnonzero((HW[:,side]>.85)&(hand_dist<.10*height))
+  if len(hand_ids)<8:hand_ids=np.flatnonzero((NW[:,side]>.95)&inner)
   assert len(hand_ids)>3,(kind,side,'palm')
   payload.update({f'palm_v{side}':v[hand_ids],f'palm_w{side}':W[hand_ids],f'palm_ids{side}':hand_ids})
   counts.append(dict(foot_vertices=len(ids),sole_vertices=len(bottom),palm_vertices=len(hand_ids),shin_weighted_sole_vertices=int((W[bottom,shin]>.5).sum())))

@@ -23,6 +23,10 @@ class MotionTool:
                 *(("correct",) if correction else ()), "export"]
 
 
+# Stages that produce a motion result. A finished batch of these is the point
+# where every actor's feet must already be grounded.
+RECONSTRUCTION_STAGES = frozenset({'gvhmr', 'refine', 'footmr', 'handflow', 'flowhmr', 'exmr'})
+
 MOTION_TOOLS = {"pear": MotionTool("pear", "PEAR · Live (Experimental)", (), live=True),"gvhmr": MotionTool("gvhmr", "GVHMR", ("track", "gvhmr"), ("pva", "refine")),
                 "flowhmr": MotionTool("flowhmr", "FlowHMR", ("track", "flow_camera", "flow_features", "flowhmr")),
                 "exmr": MotionTool("exmr", "ExMR", ("track", "exmr_preprocess", "exmr_features", "exmr")),

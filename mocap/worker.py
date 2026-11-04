@@ -153,6 +153,7 @@ def main() -> int:
     parser.add_argument('--hand-lock',type=int,choices=(0,1),default=0)
     parser.add_argument('--correction-mode',choices=['flat','multi_level'],default='flat')
     parser.add_argument('--pelvis-offset',type=float,default=0.)
+    parser.add_argument('--occlusion-fill',type=int,choices=(0,1),default=1)
     args = parser.parse_args()
     from .model_session import set_memory_budget
     from .compute_policy import configure_worker_cpu,gpu_memory_fraction,GIB
@@ -186,7 +187,7 @@ def main() -> int:
                 manifest["pipeline"] = {"model": args.motion_tool or "gvhmr", "result": args.result,
                                         "htd_refine": result_options(args.result)[0], "footmr": result_options(args.result)[1], 'handflow':has_handflow(args.result)}
                 if args.result.startswith('corrected_'):
-                    manifest['correction']={'auto_floor':args.floor is None,'floor':float(args.floor or 0),'preset':args.correction_preset,'pelvis_offset':args.pelvis_offset,'mode':args.correction_mode,'foot_lock':bool(args.foot_lock),'hand_lock':bool(args.hand_lock)}
+                    manifest['correction']={'auto_floor':args.floor is None,'floor':float(args.floor or 0),'preset':args.correction_preset,'pelvis_offset':args.pelvis_offset,'mode':args.correction_mode,'foot_lock':bool(args.foot_lock),'hand_lock':bool(args.hand_lock),'occlusion_fill':bool(args.occlusion_fill)}
             atomic_json(project / "project.json", manifest)
             emit("prepared", project=str(project), manifest={k: v for k, v in manifest.items() if k != "original_times"})
             return 0
@@ -285,7 +286,7 @@ def main() -> int:
                 output=discover(project,emit)
             else:
                 output=prepare_person(project,args.person_id,args.first_frame,args.end_frame or manifest['frames'],args.result,
-                    {'auto_floor':args.floor is None,'floor':float(args.floor or 0),'preset':args.correction_preset,'pelvis_offset':args.pelvis_offset,'mode':args.correction_mode,'foot_lock':bool(args.foot_lock),'hand_lock':bool(args.hand_lock)},emit)
+                    {'auto_floor':args.floor is None,'floor':float(args.floor or 0),'preset':args.correction_preset,'pelvis_offset':args.pelvis_offset,'mode':args.correction_mode,'foot_lock':bool(args.foot_lock),'hand_lock':bool(args.hand_lock),'occlusion_fill':bool(args.occlusion_fill)},emit)
             emit('complete',stage=args.stage,output=str(output),elapsed=time.monotonic()-started,cached=False,
                 peak_ram_gib=round(psutil.Process().memory_info().peak_wset/1024**3,3),
                 peak_cuda_allocated_gib=round(torch.cuda.max_memory_allocated()/1024**3,3) if torch.cuda.is_initialized() else 0)
