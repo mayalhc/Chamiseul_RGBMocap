@@ -121,7 +121,7 @@ files together:
    short path such as `D:\RGBMoCap`:
 
    ```cmd
-   git clone https://github.com/creatorchamiseul/toyxyz_RGBMocap.git RGBMoCap
+   git clone https://github.com/mayalhc/toyxyz_RGBMocap.git RGBMoCap
    cd RGBMoCap
    ```
 
@@ -170,9 +170,9 @@ running it.
 
 ## Repositories
 
-- Distribution checkout: `https://github.com/creatorchamiseul/toyxyz_RGBMocap`
+- Distribution checkout: `https://github.com/mayalhc/toyxyz_RGBMocap`
   (this fork contains the current retargeting, export and hardware checks).
-- Upstream source: `https://github.com/toyxyz/toyxyz_RGBMocap`.
+- Upstream source: `https://github.com/toyxyz/toyxyz_RGBMocap` (distribution checkout it forks: `https://github.com/creatorchamiseul/toyxyz_RGBMocap`).
 
 Documentation clone URLs must match the repository users are told to clone;
 cloning upstream gives an older build without these changes.

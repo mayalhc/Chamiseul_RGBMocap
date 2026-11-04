@@ -5,6 +5,67 @@
 A native Windows app that turns video into editable human animation. Review and
 export motion with AI processing running locally.
 
+> **Fork notice.** This is a community fork of
+> [creatorchamiseul/toyxyz_RGBMocap](https://github.com/creatorchamiseul/toyxyz_RGBMocap)
+> (original project by toyxyz: [toyxyz/toyxyz_RGBMocap](https://github.com/toyxyz/toyxyz_RGBMocap)).
+> All credit for the core application belongs to its authors. This page lists
+> what this fork changes and adds. The original code stays under its MIT
+> license; model weights and third-party code keep their own licenses
+> (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+
+## What this fork changes
+
+Based on upstream `main` at commit `ef05127`, which already includes multi-camera
+support, MAMMA, PromptHMR and PEAR. Everything below is in this fork and not in
+that tree.
+
+### Live Link to Blender and Cascadeur
+- **Blender add-on `rgbmocap_bridge`** ([blender_addon/](blender_addon/)): streams the app's
+  pose into a live Blender scene, loads a base character, and imports/exports bodies.
+  Long project paths no longer break *Load Base Character* on Windows.
+- **Cascadeur live link** (`mocap/cascadeur_link.py`, `cascadeur_receiver.py`): drives the open
+  Cascadeur character, now including characters in **Rig Mode** (driven through the rig
+  points, because the rig undoes direct joint writes). Verified on a rigged scene at a median
+  0.1-0.3 degree bone-direction difference.
+- **Live preview sources**: webcam preview/capture dialog, and a **web video link** (including
+  pages that only play a video in a browser) as the live source.
+- Live character, channel and solver modules (`mocap/live_*.py`) with end-to-end check tools in `tools/`.
+
+### Ground and floor
+- **Floor Height defaults to 0** and is editable; typing a value turns *Auto Floor Height* off,
+  so exports land on Y = 0 in other tools.
+- **Floor reference board** (`mocap/floor_board.py`): a printed, measured ground plane instead of
+  one inferred from foot contacts. Plus continuous local ground height for long clips
+  (`ground_track.py`) and camera-motion advice (`camera_motion.py`).
+
+### Motion quality
+- **Occlusion fill** and detection-gap detection: frames where the person detector lost the actor
+  are rebuilt instead of coming from the body prior.
+- Source video **audio plays with the preview**.
+- 2D keypoint preview and a backfill tool for older projects.
+
+### Characters and retargeting
+- Mixamo character retarget fixes, a **Follow Source** option, a **Character Bones** overlay,
+  finger retargeting (`retarget/fingers.py`), and a Display menu.
+- FBX writer/binder and Blender bake updates, long-path-safe retarget export.
+
+### Models and setup
+- **Model Manager sign-in helpers** (`mocap/model_signin.py`): *Open Download Page & Auto-Import*
+  watches your Downloads folder, validates the file you fetched while signed in to the provider,
+  stores it in the right `models/` folder and removes the original. An optional *Auto Download*
+  posts your own provider login for one request; it is never stored. No files are redistributed.
+- GPU/driver requirement checks shared by the installer preflight and *Help > Check System*
+  (`mocap/gpu_support.py`, `tools/preflight.py`).
+- `docs/DISTRIBUTION.md` and `docs/REAL_BOARD_CHECK.md`; USER_GUIDE updates.
+
+## Support this fork
+
+If this fork saves you time, you can support its development through
+**[GitHub Sponsors](https://github.com/sponsors/mayalhc)**. Sponsorship supports maintenance of the
+application code, tools and documentation in this repository. It does not sell, and does not grant
+rights to, any third-party model, weight or body-model file, which remain under their providers' terms
+(many are non-commercial research licenses).
+
 ## Sample videos
 
 ### Motion capture
@@ -31,7 +92,7 @@ https://github.com/user-attachments/assets/4c0b290b-4a65-4287-8d22-c63c96b3d080
    in a writable folder where you want to install RGB MoCap, then clone the repository:
 
    ```cmd
-   git clone https://github.com/toyxyz/toyxyz_RGBMocap.git
+   git clone https://github.com/mayalhc/toyxyz_RGBMocap.git
    cd toyxyz_RGBMocap
    ```
 

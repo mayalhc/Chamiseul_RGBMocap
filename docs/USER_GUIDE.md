@@ -106,7 +106,7 @@ have not yet been verified; compatibility reports are welcome.
    Prompt** in a writable folder, then run:
 
    ```cmd
-   git clone https://github.com/toyxyz/toyxyz_RGBMocap.git
+   git clone https://github.com/mayalhc/toyxyz_RGBMocap.git
    cd toyxyz_RGBMocap
    ```
 
