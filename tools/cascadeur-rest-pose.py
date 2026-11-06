@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Chamiseul. All rights reserved.
+# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
 """Send the character's own rest pose to Cascadeur and report what came back.
 
   runtime/python.exe tools/cascadeur-rest-pose.py [project] [--facing DEG]

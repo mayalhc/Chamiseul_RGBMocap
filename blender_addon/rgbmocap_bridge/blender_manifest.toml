@@ -9,7 +9,7 @@ type = "add-on"
 
 tags = ["Animation", "Rigging"]
 blender_version_min = "4.2.0"
-license = ["SPDX:MIT"]
+license = ["SPDX:LicenseRef-Chamiseul-Proprietary"]
 
 [permissions]
 files = "Import and export character FBX and GLB files"

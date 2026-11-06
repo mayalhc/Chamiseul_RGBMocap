@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Chamiseul. All rights reserved.
+# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
 """RGB MoCap Bridge: rig mapping, flat-ground snapping and FBX/GLB export.
 
 The extension manifest (blender_manifest.toml) carries the package metadata;

@@ -106,8 +106,8 @@ have not yet been verified; compatibility reports are welcome.
    Prompt** in a writable folder, then run:
 
    ```cmd
-   git clone https://github.com/mayalhc/toyxyz_RGBMocap.git
-   cd toyxyz_RGBMocap
+   git clone https://github.com/mayalhc/Chamiseul_RGBMocap.git
+   cd Chamiseul_RGBMocap
    ```
 
    Avoid protected folders such as Program Files. The commands below are for
@@ -882,6 +882,8 @@ See [Build from source](BUILD.md) for environment setup, editing and release bui
 Original RGB MoCap code/documentation uses the [MIT License](../LICENSE).
 Third-party code, derived modifications, weights and body data keep their own
 terms; see [Third-party notices](../THIRD_PARTY_NOTICES.md).
+The Blender add-on and the Cascadeur live link are proprietary and may not be
+redistributed; see [LICENSE-CHAMISEUL.md](../LICENSE-CHAMISEUL.md).
 
 ## PEAR live preview
 

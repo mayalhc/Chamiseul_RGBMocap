@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Chamiseul. All rights reserved.
+# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
 """FBX and glTF binary export using the app's export conventions.
 
 Only options this Blender supports are passed, so the same addon runs on the

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Chamiseul. All rights reserved.
+# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
 """Build the app's displayed body from the data it streams.
 
 The app writes the surface it draws together with the skeleton it exports: rest

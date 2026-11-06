@@ -121,7 +121,7 @@ files together:
    short path such as `D:\RGBMoCap`:
 
    ```cmd
-   git clone https://github.com/mayalhc/toyxyz_RGBMocap.git RGBMoCap
+   git clone https://github.com/mayalhc/Chamiseul_RGBMocap.git RGBMoCap
    cd RGBMoCap
    ```
 
@@ -170,7 +170,7 @@ running it.
 
 ## Repositories
 
-- Distribution checkout: `https://github.com/mayalhc/toyxyz_RGBMocap`
+- Distribution checkout: `https://github.com/mayalhc/Chamiseul_RGBMocap`
   (this fork contains the current retargeting, export and hardware checks).
 - Upstream source: `https://github.com/toyxyz/toyxyz_RGBMocap` (distribution checkout it forks: `https://github.com/creatorchamiseul/toyxyz_RGBMocap`).
 

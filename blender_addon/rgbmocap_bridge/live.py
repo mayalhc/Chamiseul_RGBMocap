@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Chamiseul. All rights reserved.
+# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
 """Live link client: play what RGB MoCap shows on a rig in Blender.
 
 The app normally streams the character it is displaying: the path of that

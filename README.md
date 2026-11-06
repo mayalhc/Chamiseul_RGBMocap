@@ -12,6 +12,10 @@ export motion with AI processing running locally.
 > what this fork changes and adds. The original code stays under its MIT
 > license; model weights and third-party code keep their own licenses
 > (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+>
+> **License exception:** the Blender add-on (`blender_addon/`) and the Cascadeur
+> live link are original work by Chamiseul and are **proprietary, not MIT**:
+> redistribution is prohibited. See [LICENSE-CHAMISEUL.md](LICENSE-CHAMISEUL.md).
 
 ## What this fork changes
 
@@ -92,8 +96,8 @@ https://github.com/user-attachments/assets/4c0b290b-4a65-4287-8d22-c63c96b3d080
    in a writable folder where you want to install RGB MoCap, then clone the repository:
 
    ```cmd
-   git clone https://github.com/mayalhc/toyxyz_RGBMocap.git
-   cd toyxyz_RGBMocap
+   git clone https://github.com/mayalhc/Chamiseul_RGBMocap.git
+   cd Chamiseul_RGBMocap
    ```
 
 2. Prepare the runtimes for ExMR, FlowHMR and GVHMR with their supported add-ons,

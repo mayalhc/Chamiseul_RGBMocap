@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Chamiseul. All rights reserved.
+# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
 """Remove a legacy scripts/addons copy of the bridge, so the extension is the only one.
 
 Run with Blender: blender -b --python blender_addon/legacy_cleanup.py

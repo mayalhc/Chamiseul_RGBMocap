@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Chamiseul. All rights reserved.
+# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
 """Flat-ground snapping for an imported character clip.
 
 The app plants the displayed sole on one common plane; this applies the same

@@ -24,7 +24,9 @@ SOFTWARE.
 Scope and third-party components
 
 The MIT grant above applies to original code and documentation contributed to
-RGB MoCap. It does not relicense third-party code, modifications derived from
+RGB MoCap, except the Covered Files listed in LICENSE-CHAMISEUL.md (the Blender
+add-on and the Cascadeur live link), which are proprietary and may not be
+redistributed. It does not relicense third-party code, modifications derived from
 third-party code, dependencies, model weights, registered body models or other
 external assets, wherever they are located. Those materials retain their
 respective licenses and notices.

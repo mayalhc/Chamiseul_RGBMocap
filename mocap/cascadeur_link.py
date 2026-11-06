@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Chamiseul. All rights reserved.
+# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
 """Live link: stream what the app shows into an open Cascadeur scene.
 
 Cascadeur has no listening socket of its own, so the link is created from this
