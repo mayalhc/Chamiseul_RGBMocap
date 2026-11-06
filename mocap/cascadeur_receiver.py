@@ -1,5 +1,5 @@
-# Copyright (c) 2026 Chamiseul. All rights reserved.
-# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
+# Copyright (c) 2026 Chamiseul
+# SPDX-License-Identifier: MIT (see LICENSE in the repository root)
 """Live pose receiver that runs inside Cascadeur.
 
 Nothing imports this file. `mocap.cascadeur_link` posts its source to

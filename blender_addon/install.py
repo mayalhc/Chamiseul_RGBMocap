@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 Chamiseul. All rights reserved.
-# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
+# Copyright (c) 2026 Chamiseul
+# SPDX-License-Identifier: GPL-3.0-or-later (see blender_addon/LICENSE)
 """Build and install the RGB MoCap Bridge Blender extension.
 
   python blender_addon/install.py [--blender PATH] [--repo user_default] [--build-only]

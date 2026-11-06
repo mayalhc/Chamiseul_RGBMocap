@@ -882,8 +882,8 @@ See [Build from source](BUILD.md) for environment setup, editing and release bui
 Original RGB MoCap code/documentation uses the [MIT License](../LICENSE).
 Third-party code, derived modifications, weights and body data keep their own
 terms; see [Third-party notices](../THIRD_PARTY_NOTICES.md).
-The Blender add-on and the Cascadeur live link are proprietary and may not be
-redistributed; see [LICENSE-CHAMISEUL.md](../LICENSE-CHAMISEUL.md).
+The Blender add-on is licensed GPL-3.0-or-later ([LICENSE](../blender_addon/LICENSE));
+the Cascadeur live link is MIT like the rest of the original code.
 
 ## PEAR live preview
 

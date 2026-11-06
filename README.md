@@ -13,9 +13,9 @@ export motion with AI processing running locally.
 > license; model weights and third-party code keep their own licenses
 > (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 >
-> **License exception:** the Blender add-on (`blender_addon/`) and the Cascadeur
-> live link are original work by Chamiseul and are **proprietary, not MIT**:
-> redistribution is prohibited. See [LICENSE-CHAMISEUL.md](LICENSE-CHAMISEUL.md).
+> **Licenses:** the Blender add-on (`blender_addon/`) is original work by Chamiseul under
+> **GPL-3.0-or-later** ([blender_addon/LICENSE](blender_addon/LICENSE)). The Cascadeur live link
+> is original work by Chamiseul under the **MIT** license ([LICENSE](LICENSE)).
 
 ## What this fork changes
 

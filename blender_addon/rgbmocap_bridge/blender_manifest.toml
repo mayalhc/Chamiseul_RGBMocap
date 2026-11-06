@@ -4,12 +4,12 @@ id = "rgbmocap_bridge"
 version = "1.0.0"
 name = "RGB MoCap Bridge"
 tagline = "Rig mapping, flat-ground snapping and FBX/GLB export"
-maintainer = "RGB MoCap"
+maintainer = "Chamiseul"
 type = "add-on"
 
 tags = ["Animation", "Rigging"]
 blender_version_min = "4.2.0"
-license = ["SPDX:LicenseRef-Chamiseul-Proprietary"]
+license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
 files = "Import and export character FBX and GLB files"

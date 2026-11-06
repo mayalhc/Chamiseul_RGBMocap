@@ -1,5 +1,5 @@
-# Copyright (c) 2026 Chamiseul. All rights reserved.
-# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
+# Copyright (c) 2026 Chamiseul
+# SPDX-License-Identifier: MIT (see LICENSE in the repository root)
 """Check the Cascadeur live link end to end against a running Cascadeur.
 
   runtime/python.exe tools/verify-cascadeur-live.py

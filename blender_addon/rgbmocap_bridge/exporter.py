@@ -1,5 +1,5 @@
-# Copyright (c) 2026 Chamiseul. All rights reserved.
-# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
+# Copyright (c) 2026 Chamiseul
+# SPDX-License-Identifier: GPL-3.0-or-later (see blender_addon/LICENSE)
 """FBX and glTF binary export using the app's export conventions.
 
 Only options this Blender supports are passed, so the same addon runs on the

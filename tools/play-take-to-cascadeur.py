@@ -1,5 +1,5 @@
-# Copyright (c) 2026 Chamiseul. All rights reserved.
-# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
+# Copyright (c) 2026 Chamiseul
+# SPDX-License-Identifier: MIT (see LICENSE in the repository root)
 """Stream the whole take through the real app window into Cascadeur.
 
   runtime/python.exe -B tools/play-take-to-cascadeur.py [project] [fps]

@@ -1,7 +1,6 @@
 # RGB MoCap Bridge (Blender extension)
 
-> Proprietary. Copyright (c) 2026 Chamiseul. Redistribution is prohibited; see
-> [LICENSE-CHAMISEUL.md](../LICENSE-CHAMISEUL.md).
+> Copyright (c) 2026 Chamiseul. Licensed under GPL-3.0-or-later; see [LICENSE](LICENSE).
 
 The parts of RGB MoCap that make sense inside Blender, without the app, the AI
 models or its Python runtimes:

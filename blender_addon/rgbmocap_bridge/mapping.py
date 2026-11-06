@@ -1,5 +1,5 @@
-# Copyright (c) 2026 Chamiseul. All rights reserved.
-# Proprietary: redistribution prohibited. See LICENSE-CHAMISEUL.md in the repository root.
+# Copyright (c) 2026 Chamiseul
+# SPDX-License-Identifier: GPL-3.0-or-later (see blender_addon/LICENSE)
 """Humanoid bone detection for imported character rigs.
 
 The canonical names are the Mixamo names RGB MoCap already expects, and the
