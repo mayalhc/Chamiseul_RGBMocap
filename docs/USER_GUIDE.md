@@ -500,6 +500,36 @@ folders over them. The `models` folder contains model files only. Saved work
 is in separate project folders, which can be copied separately and opened
 with **File → Open Project**.
 
+## Low-VRAM GPUs
+
+The GPU requirement is memory, not the card generation: RTX 20, 30, 40 and 50 series cards
+run the pinned runtime, and 6 GB is the in-app minimum (12 GB recommended). Short checks
+with limited free VRAM (an RTX 5080 with another process holding part of its memory, so
+this approximates, but is not, a real 8 GB or 6 GB card):
+
+| Model (default options, one actor) | Clip | Free VRAM at start | Result | Process VRAM peak |
+| --- | --- | --- | --- | --- |
+| GVHMR | 7 s, 210 frames | about 6.9 GiB | Completed, 4 min 38 s | about 4.3 GiB |
+| ExMR | 7 s, 210 frames | about 6.9 GiB | Completed, 2 min 19 s | about 6.2 GiB |
+| ExMR | 7 s, 210 frames | about 5.4 GiB | Completed, 2 min 52 s (Low Memory: 2 min 02 s) | about 4.3 GiB (Low Memory: 4.0 GiB) |
+| ExMR | 20 s, 600 frames | about 4.6 GiB | Completed, 2 min 08 s | about 4.3 GiB |
+| FlowHMR | 7 s, 210 frames | about 6.9 GiB | Completed, 2 min 28 s | about 6.2 GiB |
+| FlowHMR | 20 s, 600 frames | about 6.7 GiB | Completed, 2 min 23 s | about 5.9 GiB |
+
+Peak is the process increase seen by `nvidia-smi` (sampled once per second), not PyTorch's
+allocated peak, and the source was a 1080p clip converted to 30 fps. Not tested: real 6-8 GB
+cards, less than about 4.6 GiB free, several actors, clips longer than 20 s, MAMMA and PromptHMR.
+The larger peaks in [recorded processing time and VRAM](#recorded-processing-time-and-vram)
+come from other clips and can apply to yours.
+
+If a run stops with a memory message:
+
+- Close other GPU programs first (browsers, Blender, audio or video tools keep VRAM).
+- Set **Resource Mode > Low Memory**; it is slower on some models but lowers peak VRAM.
+- Trim the clip and process it in sections.
+- GVHMR had the lowest peak in these checks.
+- Completed stages are kept, so retrying continues from the last finished stage.
+
 ## Model and processing settings
 
 Changes to camera, smoothing or feature settings take effect on **Reconstruct 3D**.
