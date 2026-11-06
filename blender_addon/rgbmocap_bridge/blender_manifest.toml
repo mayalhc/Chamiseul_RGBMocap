@@ -5,6 +5,7 @@ version = "1.0.0"
 name = "RGB MoCap Bridge"
 tagline = "Rig mapping, flat-ground snapping and FBX/GLB export"
 maintainer = "Chamiseul"
+website = "https://github.com/mayalhc/Chamiseul_RGBMocap"
 type = "add-on"
 
 tags = ["Animation", "Rigging"]
