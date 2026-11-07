@@ -736,6 +736,24 @@ def build_workspace(w):
     w.cascadeur_link_action.setCheckable(True)
     w.cascadeur_link_action.setToolTip(tooltip_text('Drive the character in Cascadeur from this window over localhost, with no file to export and re-import.\nStart Cascadeur, import the character you exported from here, then start this. Play, pause or scrub here and the Cascadeur take is written as you watch.\nLeave Cascadeur closed and nothing happens; the link is only created while Cascadeur is answering.'))
     w.cascadeur_link_action.toggled.connect(w.toggle_cascadeur_link)
+    from PySide6.QtGui import QActionGroup
+    w.live_engine_menu = file_menu.addMenu('Live Body Estimator')
+    w.live_engine_group = QActionGroup(w.live_engine_menu)
+    w.live_engine_group.setExclusive(True)
+    w.live_engine_actions = {}
+    for engine, variant, label, tip in (
+            ('sam', 'medium', 'SAM 3D Body (accurate, slow)', 'The original live estimator. Loads in minutes and takes a few hundred milliseconds per frame.'),
+            ('instanthmr', 'medium', 'InstantHMR medium (fast)', 'Real-time estimator. Needs Setup_InstantHMR.cmd and its model files from Model Manager. Weights are CC BY-NC 4.0: non-commercial use only.'),
+            ('instanthmr', 'nano', 'InstantHMR nano (fastest)', 'Smallest and fastest InstantHMR weights. Less accurate. CC BY-NC 4.0: non-commercial use only.'),
+            ('instanthmr', 'commercial', 'InstantHMR medium-commercial (Apache-2.0)', 'InstantHMR weights trained only on images that allow commercial use. Less accurate than medium.')):
+        action = w.live_engine_menu.addAction(label)
+        action.setCheckable(True)
+        action.setToolTip(tooltip_text(tip))
+        action.triggered.connect(lambda checked=False, e=engine, v=variant: w.choose_live_engine(e, v))
+        w.live_engine_group.addAction(action)
+        w.live_engine_actions[(engine, variant)] = action
+    w.live_engine_menu.setToolTipsVisible(True)
+    w.refresh_live_engine_menu()
     file_menu.addAction("Open Project Folder", w.open_folder)
     file_menu.addSeparator()
     file_menu.addAction("Exit", w.close)

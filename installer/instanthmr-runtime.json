@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "package": "onnxruntime-gpu",
+  "python": "3.12",
+  "wheel": {
+    "url": "https://files.pythonhosted.org/packages/a4/e4/9b378a5466ea0bed65e5beb8e09254973c580a6522810a38afbcc45e5105/onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl",
+    "bytes": 226548963,
+    "sha256": "5f49c44689894650990e4c8a857d2edafc276fbd79bba57ceb224bd18d25d491"
+  }
+}

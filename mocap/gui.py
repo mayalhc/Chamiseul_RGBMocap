@@ -1271,6 +1271,61 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         # this take's rig, which still brings that person's proportions.
         return (asset, binding if binding.is_file() else None)
 
+    def live_engine_choice(self):
+        """(engine, variant) the live character will use, after checking it can start."""
+        from .instanthmr_backend import problem, settings
+        engine, variant = settings()
+        if engine == 'instanthmr':
+            reason = problem(variant)
+            if reason:
+                self.filename.setText('InstantHMR unavailable, using SAM 3D Body: ' + reason)
+                return 'sam', variant
+        return engine, variant
+
+    def live_engine_args(self):
+        engine, variant = self.live_engine_choice()
+        return ['--engine', engine, '--instant-variant', variant]
+
+    def refresh_live_engine_menu(self):
+        from .instanthmr_backend import settings
+        engine, variant = settings()
+        actions = getattr(self, 'live_engine_actions', {})
+        action = actions.get((engine, variant if engine == 'instanthmr' else 'medium'))
+        if action is not None:
+            action.setChecked(True)
+
+    def choose_live_engine(self, engine, variant):
+        from .instanthmr_backend import missing_models, overlay_ready, problem, save
+        downloads = []
+        if engine == 'instanthmr':
+            if not overlay_ready():
+                reason = problem(variant)
+                self.status.setText(reason)
+                self.filename.setText(reason)
+                self.refresh_live_engine_menu()
+                return
+            downloads = missing_models(variant)
+            if downloads and self.busy:
+                self.status.setText('Wait for the current job to finish, then choose InstantHMR again to download its model files.')
+                self.refresh_live_engine_menu()
+                return
+        try:
+            save(engine, variant)
+        except (OSError, ValueError) as error:
+            self.status.setText('Could not save the live estimator choice: ' + str(error))
+            self.refresh_live_engine_menu()
+            return
+        # A solver warmed in the background was loaded with the old estimator.
+        if getattr(self, 'preload_worker', None) is not None:
+            self.stop_preloaded_worker()
+        name = 'SAM 3D Body' if engine == 'sam' else 'InstantHMR ' + variant
+        self.status.setText('Live estimator: ' + name + '. It applies the next time the live character starts.')
+        if downloads:
+            # Public, hash-checked files; SAM 3D Body keeps driving the live character until they are in place.
+            self.start_jobs([('download', ['--model', model.key]) for model in downloads])
+            self.status.setText('Downloading the InstantHMR model files (' + ', '.join(model.name for model in downloads)
+                                + '). SAM 3D Body is used until they finish.')
+
     def start_live_body(self):
         """Present the live character: feed it frames and follow its solves.
 
@@ -1385,7 +1440,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         from .live_channel import progress_file
         try:
             worker = subprocess.Popen([str(python), '-B', '-m', 'mocap.live_worker', '--preload',
-                                       '--progress', str(progress_file(ROOT, 'preload'))],
+                                       '--progress', str(progress_file(ROOT, 'preload')),
+                                       *self.live_engine_args()],
                                       cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT,
                                       creationflags=CREATE_NO_WINDOW)
         except OSError:
@@ -1538,6 +1594,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self._live_progress_file = progress_file(ROOT, channel.name)
         command = [str(python), '-B', '-m', 'mocap.live_worker', '--channel', channel.name,
                    '--progress', str(self._live_progress_file)]
+        command += self.live_engine_args()
         if supplied:
             command += ['--rig', rig_path]
             if binding_path and Path(binding_path).is_file():

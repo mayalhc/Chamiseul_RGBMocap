@@ -102,6 +102,8 @@ MODELS_LIST.extend(Model(**entry) for entry in MAMMA_ASSETS)
 from .prompthmr_models import ASSETS as PHMR_ASSETS,KEYS as PHMR_KEYS,CAMERA_KEYS as PHMR_CAMERA_KEYS,INSTRUCTIONS as PHMR_INSTRUCTIONS
 from .pear_models import ASSETS as PEAR_ASSETS,KEYS as PEAR_KEYS,INSTRUCTIONS as PEAR_INSTRUCTIONS
 MODELS_LIST.extend(Model(**entry) for entry in PEAR_ASSETS)
+from .instanthmr_models import ASSETS as INSTANT_ASSETS
+MODELS_LIST.extend(Model(**entry) for entry in INSTANT_ASSETS)
 MODELS_LIST.extend(Model(**entry) for entry in PHMR_ASSETS)
 BY_KEY = {model.key: model for model in MODELS_LIST}
 if len(BY_KEY)!=len(MODELS_LIST):raise ValueError('Duplicate model identifiers in the model registry.')
@@ -246,6 +248,7 @@ def manual_instructions_html(key: str) -> str:
 STAGE_REQUIREMENTS = {
     'prompthmr_camera_assets': PHMR_CAMERA_KEYS,
     'pear_assets': ('pear','pear_geometry','pear_yolo'),
+    'live_instanthmr': ('instanthmr_medium','instanthmr_body'),
     'pear_align': ('flow_vggt','pear_geocalib'),
     "people": ("yolo", "person_reid"),
     "track": ("yolo",), "pva": ("pva",),
@@ -277,7 +280,7 @@ def ready(model: Model) -> bool:
         from .pear_models import geometry_ready
         return geometry_ready()
     valid=model.path.is_file() and model.path.stat().st_size >= model.minimum_bytes
-    if valid and (model.key.startswith(('flow','hand','exmr','mamma','phmr','pear')) or model.key in ('smplh','mano_right')):
+    if valid and (model.key.startswith(('flow','hand','exmr','mamma','phmr','pear','instanthmr')) or model.key in ('smplh','mano_right')):
         import json
         try:
             receipt=json.loads(model.path.with_suffix(model.path.suffix+'.receipt.json').read_text(encoding='utf-8'))

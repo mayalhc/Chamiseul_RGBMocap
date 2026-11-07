@@ -163,3 +163,8 @@ text-to-motion generator.
 Camera Align also uses VGGT-Omega with its existing source/model acknowledgements.
 Its background-floor estimation and fixed-rig multiview fusion are application
 features, not an official PEAR multiview inference mode.
+
+## InstantHMR
+
+Adjel, M., Chalabi, K., Bonnet, V. *InstantHMR: Real-Time Human Mesh Recovery on Your Phone.*
+HAL preprint hal-05854387, 2026. Source: https://github.com/Naturalpad-studio/InstantHMR

@@ -736,6 +736,15 @@ a take shows) and mirrors the performer frame by frame; the timeline stays
 where it is and no frame is stored. The first start loads the 3D solver (a few
 minutes, once per session); after that the character follows at a live rate.
 
+**File > Live Body Estimator** chooses what turns each camera frame into the live
+character. **SAM 3D Body** (default) is the most accurate and takes about 115 ms per
+frame on the test PC. **InstantHMR** is a real-time estimator: about 18 ms per frame,
+which let the same test live clip run near 21 frames per second against 8 for SAM 3D Body
+(measured on one RTX 5080; accuracy differs, see [InstantHMR](models/INSTANTHMR.md)).
+InstantHMR needs one extra component: close the app and run `Setup_InstantHMR.cmd`, then
+pick InstantHMR; its model files download automatically. The choice applies the next time
+the live character starts. If InstantHMR cannot start, the app says why and uses SAM 3D Body.
+
 **Rotation** turns the capture upright: stand the camera on its side for a
 portrait picture (the person fills the frame at desk distance) and pick the
 90° that levels the picture. The video view, the recorded windows all follow

@@ -46,6 +46,10 @@ def parse_args():
                         help="the open take's prepared character skin binding")
     parser.add_argument('--progress', default='',
                         help='file the GUI reads for the start-up step and its numbers')
+    parser.add_argument('--engine', choices=('sam', 'instanthmr'), default='sam',
+                        help='live body estimator: SAM 3D Body (accurate) or InstantHMR (fast)')
+    parser.add_argument('--instant-variant', default='medium',
+                        help='InstantHMR weights: medium, nano or commercial')
     return parser.parse_args()
 
 
@@ -263,13 +267,25 @@ def main():
         return
 
     progress.step(4, 'Loading the body model')
-    print('LIVE-WORKER: loading SAM 3D Body (once; this takes a few minutes)', flush=True)
-    flow_root = str(UPSTREAM / 'FlowHMR')
-    if flow_root not in sys.path:
-        sys.path.insert(0, flow_root)
-    from .flow_sam import build_extractor
-    extractor = build_extractor(torch.device('cuda'), fast=True, low_memory=False)
-    estimator = extractor.estimator
+    instant = None
+    estimator = None
+    if args.engine == 'instanthmr':
+        print('LIVE-WORKER: loading InstantHMR (%s)' % args.instant_variant, flush=True)
+        from .instanthmr_backend import load as load_instant
+        try:
+            instant = load_instant(args.instant_variant)
+        except Exception as error:
+            if channel is not None:
+                channel.fail(str(error)[-450:])
+            raise
+    else:
+        print('LIVE-WORKER: loading SAM 3D Body (once; this takes a few minutes)', flush=True)
+        flow_root = str(UPSTREAM / 'FlowHMR')
+        if flow_root not in sys.path:
+            sys.path.insert(0, flow_root)
+        from .flow_sam import build_extractor
+        extractor = build_extractor(torch.device('cuda'), fast=True, low_memory=False)
+        estimator = extractor.estimator
     progress.step(5, 'Computing the first pose')
 
     def detect(image):
@@ -291,6 +307,9 @@ def main():
 
     def solve_frame(image, box):
         """SAM 3D Body body-only -> the app's 22 joints."""
+        if instant is not None:
+            from .instanthmr_backend import keypoints as instant_keypoints
+            return body.positions(instant_keypoints(instant, image, box), np.zeros(3))
         height, width = image.shape[:2]
         k = np.array([[focal, 0, width / 2.0], [0, focal, height / 2.0], [0, 0, 1]], np.float32)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -337,7 +356,7 @@ def main():
         from .live_channel import READY
         channel.set_state(READY)
     progress.step(5, 'Computing the first pose')
-    print('LIVE-WORKER: ready (base-character follower)', flush=True)
+    print('LIVE-WORKER: ready (base-character follower, %s)' % args.engine, flush=True)
 
     published = 0
     started = time.monotonic()
