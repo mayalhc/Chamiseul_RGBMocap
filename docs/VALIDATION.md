@@ -1158,6 +1158,9 @@ showed no sustained resource growth; it is not a long-duration leak guarantee.
 
 ### PEAR support included in base installation (2026-11-01)
 
+The global retry-marker policy described in this historical test was superseded
+by [independent support recovery](#installation-recovery-and-recent-verification-2026-11-06).
+
 `install.cmd` now prepares PEAR's small source/utility overlay after the base
 runtime transaction commits. `update.cmd` reaches the same managed installation
 flow. PEAR reuses the pinned shared Python/Torch packages; model weights and
@@ -2121,3 +2124,220 @@ repeated app-wrapper failures. The adapter owns no additional readers, queues
 or threads. The updated Model Guide rendered in offscreen Qt. The installed
 MAMMA engine's 368 checked source files were unchanged. Tests/inputs remained
 outside the public checkout; no runtime package or model weight was added.
+
+
+### Installation recovery and recent verification (2026-11-06)
+
+Issue #23 exposed a post-commit PEAR download failure leaving the entire base
+installation pending. Base completion now precedes independent PEAR/alignment
+attempts; only affected capabilities are unavailable after support failure.
+Mandatory pre-commit failures remain blocking. A failed unchanged Git pull also
+preserves any earlier incomplete-install marker. Reused runtimes cannot use or
+promote a previous interrupted run's staged interpreter/directory.
+
+32 isolated fault/regression assertions passed on actual selected source
+helpers. They cover transient/permanent download errors, certificate/hash/range
+rejection, cancellation/deadline checks, offline archive reuse, base-versus-support
+failure, successful support retry without repeated full checks, forced full
+verification, source mutation, cache invalidation/expiry, stale-stage cleanup,
+promotion rollback and user-data sentinels. Three real isolated-Python managed
+installer CLI runs passed with heavyweight package/assets/native work stubbed:
+initial support failure, metadata-based retry and forced full verification.
+The fixture paths included Korean, Japanese, Chinese, accented Latin and Cyrillic.
+
+Four actual Windows CMD/local-Git checks passed for install/update argument
+forwarding, fast-forward update, refusal of tracked edits and retained pending
+state after a failed pull. Their bootstrap installation endpoint was stubbed;
+the checkout path also included spaces, multilingual text and a percent sign.
+No public Git remote was changed. A real localhost HTTPS endpoint rejected an
+untrusted certificate, then interrupted a 1 MiB pinned transfer and successfully
+resumed with a validated byte range and final SHA-256. Test trust was local to
+the test process; system certificate settings were unchanged.
+
+All six existing runtime profiles passed actual full RECORD/import verification
+with bytecode writes disabled. On one Windows PC:
+
+| Profile | Full hashes + imports | Subsequent metadata comparison |
+| --- | ---: | ---: |
+| shared | 161.57 s | 5.16 s |
+| gui | 18.75 s | 0.63 s |
+| flow | 57.74 s | 1.67 s |
+| hand | 28.22 s | 0.69 s |
+| htd | 6.31 s | 0.06 s |
+| exmr | 162.34 s | 5.20 s |
+| Total | 434.94 s | 13.42 s |
+
+The comparison scan followed full verification and had warm filesystem caches.
+It measures verification work, not total installation/update duration. The
+installer does a second metadata consistency scan before commit, plus bootstrap,
+support, auxiliary assets and receipt work. First use without a recent cache,
+changed files/dependencies or expired verification still requires full checks.
+Metadata checks are not cryptographic integrity proofs; `--verify-all` retains
+the full-check route. Fast reuse never refreshes the seven-day full-check expiry.
+
+Exact cached pinned PEAR/geometry-helper and GeoCalib/Kornia archives were also
+extracted into isolated support generations. The existing shared/Flow runtimes
+passed actual CUDA rotation/NMS operations and alignment import/CUDA-availability
+checks against those staged sources. Matching support was reused without another
+subprocess. A changed Flow base identity was rejected. The verifier bridge used
+the already installed interpreters; no installed packages or user support
+receipts were replaced. This was not a clean-Windows installation, an external
+network-failure reproduction, a GeoCalib numerical-quality test or new AI motion
+inference. Numerical algorithms, model weights and runtime package pins were
+unchanged.
+
+The development installation's PEAR/alignment support pointers were subsequently
+refreshed under the application lock, using the unchanged installed packages and
+verified cached archives. Both native checks and readiness configurations passed.
+The real launcher dependency/pending guards, GUI runtime activation and app import
+also passed without opening a GUI or running model inference. Prior support
+generations and user models/projects were preserved.
+
+## FlowHMR model download callback repair (2026-11-06)
+
+Issue #25 was reproduced before the fix: the worker's one-argument download
+wrapper rejected FlowHMR's recursive metadata call with its explicit progress
+callback. The scoped replacement accepts the original optional callback and
+restores the downloader on success, failure or interruption. Model URLs,
+SHA-256 checks, weights, runtime packages and inference calculations are unchanged.
+
+15 regression checks passed using actual download workers and tiny files served
+over localhost HTTP. They cover metadata-before-checkpoint order, sequential
+Download All-style jobs, individual downloads, verified-file reuse, metadata and
+checkpoint hash failures, interrupted transfers and retries, callback forwarding,
+nesting, cleanup and non-download dispatch. Four additional cache checks passed:
+exact reviewed hashes preserve the previous MAMMA inference identity, later edits
+invalidate normally, the complete code identity remains unchanged, and actual
+MAMMA preparation reuses a committed pre-fix result without running processing.
+
+These are isolated fixture tests, not public-provider downloads, GUI click tests,
+new motion inference or a clean-Windows installation. No user model/project files
+were changed. Test scripts and outputs are kept outside the public source tree.
+
+## Optional origin placement and symmetrical source export (2026-11-07)
+
+Source FBX/BVH exports now offer default-off origin placement and symmetrical
+rest geometry. Origin placement subtracts one constant horizontal translation per
+actor; height and travel are retained. Ordered takes of one actor share that
+offset. Symmetry averages paired lengths, mirrors reference segments/tips and
+straightens the central spine/neck/head chain. These change only exported copies;
+changed proportions can change animated hand/foot endpoints without contact IK.
+Portable Blender exports explicitly exclude both options.
+
+24 actual worker exports covered both flags on/off, optional T-pose, Generic BVH,
+Biped BVH and FBX, using a short copied ExMR result and a nonidentity shared-scene
+rotation/translation. Additional FBX files used four-frame samples from existing
+FlowHMR, GVHMR, MAMMA and PromptHMR caches, with symmetry on/off. All 32 files were
+reimported through Blender 4.5.0's ordinary importers. Maximum sampled joint
+position discrepancy against expected FK was 0.013 mm, rest-head discrepancy
+below 0.001 mm, and mirrored imported bone-length discrepancy below 0.001 mm.
+This is file-conversion agreement, not inference accuracy or a contact-quality
+claim. Tests account for Blender BVH's first key at frame 1 and FBX offset 0.
+
+Default FBX output remained byte-identical to the preceding writer, with and
+without its optional T-pose. Default Generic BVH copying remained byte-identical;
+symmetry-only Generic export retained MOTION bytes. Other checks covered averaged
+segment lengths, mirrored terminal tips, vertical central joints, independent
+actor origins/later takes, malformed input rejection, source-file preservation,
+failure before commit, destination preservation and closed frame mappings.
+15 offscreen dialog cases across all five offline models retained a 660x400
+logical-pixel window, visible unclipped controls and disabled/hidden options for
+Blender. Representative images were visually inspected. The new work did not run
+AI inference, modify user caches or test a complete real-time export gesture.
+Scripts, fixtures and generated files remain outside the public source tree.
+
+## Update launcher self-replacement repair (2026-11-07)
+
+Issue #26's unexpected command failure was reproduced in actual Windows CMD:
+a historical launcher replaced by the preceding current launcher returned 9009
+with `'B' is not recognized` after a tiny updater reported successful installation.
+CMD resumed at an old file offset in the replacement batch. The fixed launcher
+parses its final command block before starting Python; completion reporting and
+optional pause now run in the in-memory Python CLI. Explicit deferred numeric
+status expansion retains failures. A bare `exit /b` was tested and rejected
+because it lost nonzero status in the grouped-command test.
+
+34 isolated regressions passed with the installed Windows Python interpreter,
+actual CMD and local-only Git repositories. They cover shorter/longer/empty
+launcher replacements, received arguments, delayed-expansion callers, an
+inherited ERRORLEVEL shadow, Unicode/metacharacter paths, caller-batch return,
+missing runtime/startup failure, CLI cancellation, real no-argument pause,
+fast-forward replacement of both launcher and bootstrap, dirty/wrong-branch/
+divergent-update refusal, active app locking, pending-marker preservation and
+installation failure followed by successful repair. Sampled process statuses
+include 0, 1, 7, 130, 9009 and Windows 0x80004005. Model/project sentinel files
+were preserved. The existing update transaction body was unchanged.
+
+An old parent launcher cannot acquire the fix retroactively. Its first transition
+still emitted an unexpected command in the fixture; the guide documents direct
+Python invocation or rerunning the updated launcher after installation completion.
+Deleting the running launcher was explicitly checked and produces a nonzero
+missing-batch failure; forced console termination and caller-side shell expansion
+are outside the replacement guarantee. Arguments containing shell metacharacters
+must be quoted by the caller as usual.
+
+These checks used tiny local bootstrap fixtures, not runtime installation,
+GitHub publication, GPU inference or a clean-Windows installation. No user model,
+project, runtime package or dependency pin was changed. Test scripts, fixtures
+and reports remain outside the public source tree.
+## GEM-X integration checks
+
+The optional Windows setup installed the pinned GEM-X environment on an RTX
+5090 and passed the CUDA matrix and Warp checks. It reused the ExMR CPython
+base and 24 identical CUDA DLLs (3.17 GB). The model import validated all nine
+assets. Automatic downloads were also exercised for the NVIDIA statistics file
+and the official YOLOX archive, including extracting and registering the ONNX.
+
+- A 294-frame fixed-camera clip ran through the app's worker queue, preview
+  and project publication. A copied project reopened with its media and native
+  cache, including when the inference runtime was marked unavailable.
+- A separate 30-frame Low Memory run used batch one and honored a saved
+  video's nonzero timeline offset. A rejected trim preserved its current result.
+- Blender 4.5 reopened the portable scene. The 77-bone rig used only pose-bone
+  keys. Four sampled frames matched the SOMA surface cache exactly and joint
+  coordinates differed by less than 0.001 mm. The source video used the same
+  294-frame range. Mixamo FBX, VRM and PMX samples were imported and retargeted.
+  Character FBX and PMX VMD files were generated.
+- Existing ExMR, FlowHMR, GVHMR and PromptHMR cached previews were opened from
+  test copies. Existing model correction and export controls were checked in
+  Qt. These checks used cached results for the existing models.
+
+These checks cover one Windows GPU and Blender version. The Qt checks exercised
+widget state and the real job queue offscreen. A separate OpenGL 4.3 context
+executed both the surface and 77-bone shaders at three frames. See the
+[GEM-X guide](models/GEMX.md) for the supported scope and recorded resource use.
+
+### Native SOMA Motion Correction
+
+- On a saved 452-frame dance clip, Flat Ground correction took about 12 seconds
+  on the same RTX 5090. Horizontal sole speed over the applied contact intervals
+  decreased from 0.675 to 0.492 m/s at the 95th percentile. The bake preserved
+  bone lengths within 0.01 mm and retained world ankle orientations. The clip
+  provides a before/after stability check without labeled ground truth.
+- Qt/OpenGL switched the Native77 skeleton and surface together at the same
+  frame. A manual foot edit marked the export stale until Multi Level
+  correction was applied. The resulting Blender bundle included the corrected
+  skeleton and surface.
+- Fresh 60-frame inference ran the enabled correction automatically. A hand-only
+  run used the edited lock interval and preserved local finger rotations. The
+  corrected Native77 pose also retargeted to a Mixamo character through Blender.
+
+### Native SOMA FBX and BVH export
+
+- **File > Export** sent the original and corrected 60-frame GEM-X result to
+  the normal FBX and BVH workers. The corrected exports included the optional
+  SOMA rest frame and horizontal origin placement. A 452-frame cache also
+  exported in both formats before and after correction.
+- Blender 4.5 reimported the eight files. All kept the Native77 bone names,
+  hierarchy and 30 fps timing. All joint positions across the reimported
+  frames matched within 0.005 mm, including the optional reference frame and
+  origin placement. Animation channels targeted pose bones.
+- The default Blender FBX importer reproduced the initial bone-tail orientation
+  error. After aligning export axes to the rest segments, both FBX and BVH
+  stayed within 0.002 degrees of the expected bone directions across both clips.
+  The FBX axis change left the BVH bytes identical.
+- A failed export with an incompatible rest option left the existing file
+  intact and removed the staged output. Batch FBX and BVH reject destinations
+  that overlap the selected inputs. A mixed GEM-X and ExMR BVH batch rejected
+  an overwrite of a different row's source. ExMR's 52-bone FBX and BVH exports
+  passed with the T-pose, origin and symmetrical rest options enabled.

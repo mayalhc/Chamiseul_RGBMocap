@@ -203,29 +203,44 @@ def mesh_elements(rig_name, names, skin, rest, rest_frames, display):
 
 
 def write(path, names, parents, rest, rest_frames, display, tip_local, frames, fps,
-          transform=None, progress=lambda *args:None, rig_name='SourceAnimation', skin=None, prepend_tpose=False):
+          transform=None, progress=lambda *args:None, rig_name='SourceAnimation', skin=None, prepend_tpose=False,symmetric_bind=None,
+          expected_bones=52):
     """Write one committed mapped take; working rotation arrays are one bone wide."""
     from .person_names import validate_name
     rig_name=validate_name(rig_name)
     n=len(frames);parents=np.asarray(parents);rest=np.asarray(rest,float)
-    if n<1 or frames.shape!=(n,52,4,4) or not np.isfinite(fps) or fps<=0:
+    if n<1 or frames.shape!=(n,expected_bones,4,4) or not np.isfinite(fps) or fps<=0:
         raise ValueError('Invalid FBX frame dimensions/timing')
-    if len(names)!=52 or len(set(names))!=52 or names[0]!='Hips' or parents.shape!=(52,) or parents[0]!=-1:
-        raise ValueError('Expected plain 52-bone Hips hierarchy')
+    if len(names)!=expected_bones or len(set(names))!=expected_bones or names[0]!='Hips' or parents.shape!=(expected_bones,) or parents[0]!=-1:
+        raise ValueError(f'Expected {expected_bones}-bone Hips hierarchy')
     if any(not name.isascii() or any(c in name for c in ':\0\1') for name in names):
         raise ValueError('Invalid FBX bone name')
-    if rest.shape!=(52,3) or np.shape(rest_frames)!=(52,3,3) or np.shape(display)!=(52,3,3) or np.shape(tip_local)!=(52,3):
+    if rest.shape!=(expected_bones,3) or np.shape(rest_frames)!=(expected_bones,3,3) or np.shape(display)!=(expected_bones,3,3) or np.shape(tip_local)!=(expected_bones,3):
         raise ValueError('Invalid FBX rest dimensions')
-    if any(not 0<=parents[j]<j for j in range(1,52)):
+    if any(not 0<=parents[j]<j for j in range(1,expected_bones)):
         raise ValueError('Invalid FBX parents')
     for a in (rest,rest_frames,display,tip_local):
         if not np.isfinite(a).all():raise ValueError('Invalid FBX rest data')
     for a in (rest_frames,display):
         if np.max(abs(a.swapaxes(-1,-2)@a-np.eye(3)))>1e-5 or np.linalg.det(a).min()<.99999:
             raise ValueError('Invalid FBX rest rotation')
+    source_display=display
+    source_offsets=[rest[j] if p<0 else rest_frames[p].T@(rest[j]-rest[p]) for j,p in enumerate(parents)]
+    if symmetric_bind is not None:
+        from .export_options import symmetric_rest
+        from .bone_overlay import reference_frame
+        rest,ends=symmetric_rest(names,parents,symmetric_bind['rest'],symmetric_bind['ends'])
+        display=[]
+        for j in range(52):
+            children=np.flatnonzero(parents==j)
+            delta=rest[children].mean(0)-rest[j] if len(children) else ends[j]
+            if np.linalg.norm(delta)<.001:delta=delta+[0.,.1,0.]
+            display.append(reference_frame(delta))
+        display=np.asarray(display);rest_frames=display
+        tip_local=np.einsum('nji,nj->ni',display,ends)
     from .scene_camera import validate_transform
     transform=validate_transform(np.eye(4) if transform is None else transform)
-    ids=np.arange(1000,1052);objects=[];connections=[]
+    ids=np.arange(1000,1000+expected_bones);objects=[];connections=[]
     link=lambda a,b,p=None:connections.append(node('C','OO' if p is None else 'OP',int(a),int(b),*(() if p is None else (p,))))
     # Empty parent is an FBX armature container, not an extra animated bone.
     objects.append(node('Model',900,rig_name+'\0\1Model','Null',children=[node('Version',232),properties()]))
@@ -233,7 +248,7 @@ def write(path, names, parents, rest, rest_frames, display, tip_local, frames, f
     # The exported node world is the displayed basis of each bone, so the rest used
     # for PreRotation and for the animation deltas carries the same display basis.
     display=np.asarray(display,float)
-    rest_display=np.asarray(rest_frames,float)@display
+    rest_display=display if symmetric_bind is not None else np.asarray(rest_frames,float)@display
     local_rest=[];offsets=[]
     for j,p in enumerate(parents):
         R=rest_display[j] if p<0 else rest_display[p].T@rest_display[j]
@@ -249,7 +264,7 @@ def write(path, names, parents, rest, rest_frames, display, tip_local, frames, f
         objects.append(node('Model',int(ids[j]),names[j]+'\0\1Model','LimbNode',children=children))
         objects.append(node('NodeAttribute',2000+j,names[j]+'\0\1NodeAttribute','LimbNode',children=[node('TypeFlags','Skeleton')]))
         link(2000+j,ids[j]);link(ids[j],900 if p<0 else ids[p])
-    for j in range(52):
+    for j in range(expected_bones):
         if j in parents:continue
         marker=3000+j
         objects.append(node('Model',marker,names[j]+'_end\0\1Model','LimbNode',children=[
@@ -261,7 +276,7 @@ def write(path, names, parents, rest, rest_frames, display, tip_local, frames, f
         objects.extend(mesh);connections.extend(mesh_links)
     # Store an explicit bind-pose table in addition to the node defaults.
     pose_nodes=[node('PoseNode',children=[node('Node',900),node('Matrix',np.eye(4).T.reshape(-1))])]
-    for j in range(52):
+    for j in range(expected_bones):
         M=np.eye(4);M[:3,:3]=rest_display[j];M[:3,3]=rest[j]
         pose_nodes.append(node('PoseNode',children=[node('Node',int(ids[j])),node('Matrix',M.T.reshape(-1))]))
     objects.append(node('Pose',5000,'BindPose\0\1Pose','BindPose',children=[node('Type','BindPose'),node('Version',100),node('NbPoseNodes',len(pose_nodes)),*pose_nodes]))
@@ -310,8 +325,9 @@ def write(path, names, parents, rest, rest_frames, display, tip_local, frames, f
             else:
                 parent=np.asarray(frames[:,p,:3,:3],float)@display[p]
                 local=parent.swapaxes(-1,-2)@world
-                actual=np.einsum('tji,tj->ti',parent,np.asarray(frames[:,j,:3,3],float)-frames[:,p,:3,3])
-                if not np.isfinite(actual).all() or np.max(abs(actual-offsets[j]))>2e-5:
+                source_parent=np.asarray(frames[:,p,:3,:3],float)@source_display[p]
+                actual=np.einsum('tji,tj->ti',source_parent,np.asarray(frames[:,j,:3,3],float)-frames[:,p,:3,3])
+                if not np.isfinite(actual).all() or np.max(abs(actual-source_offsets[j]))>2e-5:
                     raise ValueError('Non-rigid bone offset in committed source animation')
             if not np.isfinite(local).all():raise ValueError('Non-finite FBX animation')
             if prepend_tpose:
@@ -320,7 +336,7 @@ def write(path, names, parents, rest, rest_frames, display, tip_local, frames, f
                 pose=transform[:3,:3]@display[j] if p<0 else display[p].T@display[j]
                 local=np.concatenate((pose[None],local))
             angles=np.degrees(continuous_angles(np.radians(_euler(np.asarray(local_rest[j]).T@local))))
-            curves(j,'Lcl Rotation',angles);progress(j+1,52)
+            curves(j,'Lcl Rotation',angles);progress(j+1,expected_bones)
         out.write(b'\0'*13);end=out.tell();out.seek(start);out.write(struct.pack('<IIIB',end,0,0,7));out.seek(end)
         _element(out,node('Connections',children=connections))
         _element(out,node('Takes',children=[node('Current','Motion')]))

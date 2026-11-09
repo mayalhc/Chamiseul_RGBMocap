@@ -170,6 +170,62 @@ be reused. Do not delete `models`, `projects` or the remaining `.setup` state to
 retry. If Git reports a conflict or local changes, resolve or back them up before
 running `update.cmd` again.
 
+The updater keeps completion/error reporting in Python and buffers its final CMD
+commands before Git can replace the launcher. Successful installation therefore
+does not resume at an old byte offset inside a new `update.cmd`. Failures retain
+their nonzero exit status; running without arguments pauses at the end.
+
+**One-time transition from older launchers:** an already-running old `update.cmd`
+cannot gain this protection while it is being replaced. If installation says it
+completed, followed only by an unexpected command error such as `'B' is not
+recognized`, close that window and rerun the updated `update.cmd`. Do not delete
+models, projects or setup state. To avoid the old CMD launcher for this transition,
+open CMD in the app folder, close RGB MoCap, and run:
+
+```cmd
+runtime\python.exe -I -X utf8 -B tools\git_update.py
+```
+
+Read actual Git/download/installation errors before retrying; an incomplete
+installation remains incomplete until verification succeeds. Force-closing the
+console or deleting the running launcher is not a supported update path.
+
+### Installation verification and repair
+
+First installation, changed dependencies and missing/changed runtime files still
+require full package hash and import checks. For up to seven days after a
+successful full check, ordinary updates/retries can reuse that result when the
+dependency/verifier identities and file inventory remain unchanged. This scans
+file metadata instead of repeatedly reading every package payload. The cache
+does not extend its own expiry. Size/timestamps are change detection, not a
+cryptographic proof against deliberate tampering.
+
+To force the full runtime checks, close the app and run:
+
+```cmd
+install.cmd --verify-all
+```
+
+`update.cmd --verify-all` also updates source and requests full verification.
+Existing installations without verification metadata perform one full check
+before gaining the faster retry path. The commands and separate runtime layout
+are unchanged; no new runtime manager or separate PEAR setup command is required.
+
+The base runtime transaction completes before PEAR and camera-alignment support
+are attempted independently. If only those support steps fail, setup reports
+**Installation complete with warnings** and the base app remains available.
+PEAR needs its own support; automatic MAMMA gravity needs camera-alignment
+support. Those capabilities remain unavailable until their preparation succeeds.
+Rerun `install.cmd`; the component summary is `.setup/git-components.json`.
+Failed mandatory base installation or an unresolved update still blocks launch.
+Do not manually remove `.setup/git-sync.pending` to bypass that protection.
+
+Pinned support downloads retry transient network failures up to three attempts
+with bounded waiting and validated partial-download recovery. HTTPS certificate
+and final size/SHA-256 checks remain required. Permanent errors are reported
+without an endless retry loop. Completed model/project files are not part of
+this repair work.
+
 On the tested PC, a separate-folder first install took about 10 min 32 sec with
 previously verified package downloads reused; Blender and FFmpeg were downloaded.
 A subsequent code update and runtime verification took about 1 min 55 sec. These
@@ -179,7 +235,8 @@ other PCs; connection speed and storage performance affect the time.
 ### Installed size
 
 The measured model/runtime inventory, plus GeoCalib for automatic MAMMA gravity, totals approximately
-**67.9 GB (63.2 GiB)** with the five offline models and supported add-ons installed.
+**77.8 GB (72.5 GiB)** with the six offline models and supported add-ons installed
+and GEM-X CUDA file sharing available.
 Blender and FFmpeg are included. The inventory excludes projects, imported
 characters, exports, caches (including Python bytecode), retained download
 archives, obsolete runtime generations and separately installed compiler tools.
@@ -190,11 +247,13 @@ Shared model files and hardlinks are counted once.
 | ExMR + FlowHMR + GVHMR, including supported add-ons | 12.35 GiB | 28.89 GiB | 41.23 GiB |
 | MAMMA additional files | 6.11 GiB | 3.53 GiB | 9.65 GiB |
 | PromptHMR additional files, Fixed Camera | 6.22 GiB | 6.13 GiB | 12.34 GiB |
-| **Five offline models** | **24.68 GiB** | **38.55 GiB** | **63.22 GiB** |
+| GEM-X additional files, with CUDA sharing | 2.13 GiB | 7.11 GiB | 9.24 GiB |
+| **Six offline models** | **26.81 GiB** | **45.66 GiB** | **72.46 GiB** |
 | PEAR live preview, additional | Small support overlay; shared runtime reused | ~2.84 GiB | ~2.85 GiB |
 
-Adding PEAR to all five offline sets gives an estimated combined total of about
-**66.07 GiB (70.9 GB)**. This includes about **0.11 GiB** of required GeoCalib weights; existing VGGT weights are reused. The approximately
+Adding PEAR to all six offline sets gives an estimated combined total of about
+**75.31 GiB (80.9 GB)**. Without GEM-X DLL sharing, add about **2.95 GiB**.
+This includes about **0.11 GiB** of required GeoCalib weights; existing VGGT weights are reused. The approximately
 11.3 MiB support overlay is included in base setup. Its original
 geometry ZIP needs additional download space.
 
@@ -209,18 +268,19 @@ download archives can be reused without merging runtimes.
 
 The totals above exclude optional PromptHMR moving-camera support: its verified
 extension measured **18.6 MiB**, plus **1.55 GiB** of DroidCalib/Metric3D weights.
-Including these adds about **1.57 GiB**, bringing the five offline sets to about
-**64.79 GiB**, or about **67.64 GiB** with PEAR. Allow a separate **6 GiB free
-during the native camera build**, excluding weights and compiler tools.
+Including these adds about **1.57 GiB**, bringing the six offline sets to about
+**74.03 GiB** with GEM-X sharing, or about **76.88 GiB** with PEAR. Allow a separate
+**6 GiB free during the native camera build**, excluding weights and compiler tools.
 
-**MAMMA and PromptHMR are separate optional runtime installations.** After
-`install.cmd`, use `Setup_MAMMA.cmd` or `Setup_PromptHMR.cmd` for the model you
-need, then prepare its weights in Model Manager. Neither requires the other.
+**MAMMA, PromptHMR and GEM-X are separate optional runtime installations.** After
+`install.cmd`, run the setup for your model and prepare its weights in Model Manager.
+Use [`Setup_GEMX.cmd`](models/GEMX.md#setup) for GEM-X.
 `install.cmd` and `update.cmd` do not install these optional runtimes.
 
 Final installed size is different from free space needed during setup. The base
 installer estimates **32.4 GiB free before models**, including temporary work;
-each optional setup asks for about **18 GiB free**, excluding models and compiler
+MAMMA and PromptHMR each ask for about **18 GiB free** and GEM-X asks for
+**12 GiB free**, excluding models and compiler
 tools. Download archives, C++ Build Tools, CUDA Toolkit and generated projects
 need additional space. Earlier optional setup reports of 6.19 GiB (MAMMA) and
 6.32 GiB (PromptHMR) included generated files excluded from this cache-free
@@ -253,6 +313,7 @@ may be outside the installation folder.
 | `<install folder>\.setup\mamma-downloads\` | Optional MAMMA package/source download cache. Its contents can be removed after MAMMA setup finishes; repair may need to download them again. Keep `runtime_mamma` and `.setup/mamma-runtime.json`. |
 | `<install folder>\.setup\prompthmr-downloads\` | Optional PromptHMR package/source download cache. Remove contents only after setup finishes; repair may need to download them again. Keep `runtime_prompthmr` and `.setup/prompthmr-runtime.json`. |
 | `<install folder>\.setup\prompthmr-camera-downloads\` | Optional moving-camera source/package download cache. Its contents can be removed after setup finishes. Repair may download them again. Keep `runtime_prompthmr/camera-*` and `.setup/prompthmr-camera-runtime.json`. |
+| `<install folder>\.setup\gemx-downloads\` | Verified GEM-X wheel and source download cache. Remove contents after setup finishes. Keep `runtime_gemx/`, `.setup/gemx-runtime.json` and the ExMR Python base. |
 | `<install folder>\.setup\pear-downloads\` | PEAR source/support and camera-alignment archives. Contents can be removed after installation/update finishes; repair may download them again. Keep `runtime_pear`, `.setup/pear-runtime.json` and `.setup/pear-alignment.json`. |
 | `<install folder>\temp\` | Local PEAR Torch/kernel temporary cache. Contents can be removed after closing the app and its workers; the next run can recreate them. |
 
@@ -344,14 +405,15 @@ opening a project restores its saved model. **Prepare Preview**, below
 | **GVHMR** | Lowest overall quality in our tests, but sometimes better for unusual poses such as backflips. | Optional **HandFlow**; not inferred by GVHMR itself. |
 | **MAMMA** | Multi-view capture of human motion and interactions. Needs separate setup and overlapping synchronized views; outside the quality ranking above. | Included. |
 | **PromptHMR** | Can improve relative placement and interactions between multiple people in one video. Fixed Camera is the default; Moving Camera needs optional camera setup. Overall motion quality was lower than ExMR in our subjective tests; contacts and depth can still be wrong. | No finger tracking; fixed neutral pose. |
+| **GEM-X** | Fast processing with relatively low overall motion quality in our tests. One fixed-camera video and one automatically selected primary person. | Included. |
 | **PEAR** | Live single-person bone preview from a webcam or video. Lightweight live foot lock; no offline correction, recording, retargeting or export. | Included. |
 
-The five offline models support contact correction, a 52-bone overlay, FBX/BVH export and portable Blender bundles.
-ExMR/FlowHMR/GVHMR use **Find person** for explicit people selection; MAMMA
-and PromptHMR track people during reconstruction. The viewport shows the selected
-source mesh: SMPL-X for ExMR/GVHMR/MAMMA/PromptHMR,
-SMPL-H for FlowHMR. The export skeleton follows that motion; source estimation
-errors can remain.
+All six offline models support contact correction and portable Blender bundles.
+ExMR, FlowHMR and GVHMR offer **Find person** for explicit people selection.
+MAMMA and PromptHMR track people during reconstruction. These five SMPL-based
+models offer a 52-bone overlay and FBX/BVH export. GEM-X uses the 77-bone SOMA
+rig for its overlay and FBX, BVH and Blender exports. See the
+[GEM-X guide](models/GEMX.md) for its setup, correction and retargeting workflow.
 
 ### MAMMA multi-view reconstruction
 
@@ -380,8 +442,8 @@ The app uses SAM 2.1 and FP32 fitting; SAM 3.1 research tests remain separate.
 
 Historical measurements on the tested PC above (30 fps inputs, October 2026).
 Each single-video duration uses the same input across ExMR, FlowHMR and GVHMR.
-MAMMA and PromptHMR use different clips and include more processing stages;
-their rows are not direct speed comparisons. The older four-model records predate
+MAMMA, PromptHMR and GEM-X used separate clips and timing scopes.
+Compare those rows within their recorded conditions. The older four-model records predate
 the latest Low Memory changes.
 
 For mode comparisons and the latest applied acceleration, see
@@ -401,6 +463,7 @@ clips and timing scopes from this historical table.
 | 25.7 seconds | GVHMR | 1 | 3m 00s | 5.08 | 12.42 |
 | 13.8 seconds | MAMMA | 3 | 11m 52s | 6.47 | 9.11 |
 | 14.1 seconds | PromptHMR | 1 | 3m 56s | 4.61 | 8.74 |
+| 9.8 seconds | GEM-X | 1 | 1m 44s | 3.48 | — |
 
 For PEAR's separate live-frame timings, current fixed-bone behavior and measured
 VRAM, see the [PEAR performance notes](models/PEAR.md#placement-and-performance).
@@ -419,6 +482,10 @@ PromptHMR used 422 frames at 30 fps, two people and Interaction Prompt on. Its
 time includes tracking, native inference/post-optimization and app correction/preview,
 excluding public FBX writing. Peak CUDA reserved memory was 7.83 GiB. See its
 [stage breakdown and validation](models/PROMPTHMR.md#recorded-validation).
+
+GEM-X used 294 frames at 30 fps, one fixed-camera video and one person. Time
+includes model verification, video preparation, inference and SOMA mesh evaluation.
+Peak RAM was not separately measured. See the [GEM-X guide](models/GEMX.md#resources-and-troubleshooting).
 
 VRAM is peak PyTorch **allocated** memory across workers, not total GPU usage
 or reserved memory. RAM for ExMR/FlowHMR/GVHMR is peak private memory;
@@ -607,8 +674,7 @@ disabled in Low Memory; FlowHMR SAM also uses one-frame batches in that mode.
 
 With Resource Safety enabled, GPU allocator budgets use ComfyUI's external-use margin: 600 MiB on Windows,
 or 700 MiB on GPUs larger than 15 GiB, subtracted from currently free VRAM.
-The five offline model paths use this rule; FlowHMR/ExMR no longer subtract fixed
-3/2 GiB or impose an additional 95/90% ceiling. Inference working memory is
+All six offline model paths use this rule. FlowHMR and ExMR use the same margin. Inference working memory is
 part of the allowed budget. This is not a guarantee of free VRAM: other apps
 and allocations outside PyTorch can still consume it.
 
@@ -670,17 +736,18 @@ depth and contacts between people are estimates; collision avoidance is not prov
 
 ## FBX and Blender
 
-**File → Export...** opens source-motion options: choose **FBX (.fbx)**,
-**BVH (.bvh)** or **Blender project + video (.blend)**. The optional
-**Add T-pose before motion** defaults off.
-For BVH, choose **Generic / Blender** (default) or **3ds Max Biped** in the
+**File → Export...** opens the options for the selected source model.
+For SMPL-based motion, choose **FBX (.fbx)**, **BVH (.bvh)** or
+**Blender project + video (.blend)**. **Add T-pose before motion** defaults off.
+GEM-X offers [Native77 FBX, BVH and Blender exports](#gem-x-soma-blender-bundles).
+For SMPL BVH, choose **Generic / Blender** (default) or **3ds Max Biped** in the
 **BVH profile** list.
 The selected, applied result is exported. Each checked
 person/take gets a separate named file and rig; duplicate filenames get suffixes.
 People exports use the viewport's shared placement. Takes retain their own frame
 counts; align their start times when combining different source intervals.
 
-Source-person exports use a 52-bone hierarchy with **Hips** as root and plain
+SMPL source-person exports use a 52-bone hierarchy with **Hips** as root and plain
 anatomical names by default. The Biped profile renames exported joints as described
 below. It retains
 actor lengths, SMPL-neutral curved limbs/feet, calibrated rest axes and straight
@@ -689,6 +756,26 @@ no extra frame is inserted. When enabled, one reference animation frame is place
 before the original motion, at its initial root position; original frames shift
 by one and retain their poses, frame rate and intervals. The option does not
 replace the bind pose or edit project motion/contact timings.
+
+**Place at origin** and **Symmetrical rest pose** default off and apply only to
+source-skeleton FBX/BVH exports, including both BVH profiles. They are unavailable
+for Blender project exports and do not change imported-character exports.
+
+- **Place at origin:** move each person's first exported root position to X=0,
+  Z=0, preserving its height, facing and subsequent travel. People are centered
+  independently, so their relative scene placement is intentionally removed.
+  Multiple exported takes of one person share the first exported take's constant
+  offset rather than resetting at every tracking gap. An optional leading T-pose
+  uses the same centered start.
+- **Symmetrical rest pose:** average paired left/right segment lengths and mirror
+  their reference directions, including shoulders, feet, hands, fingers and end
+  tips. The central spine/neck/head chain is vertical. Motion timing and canonical
+  animation rotations are retained, but the changed reference proportions move
+  animated joint/end positions; existing hand/foot contacts are not re-solved.
+  Source motion, correction results, viewport geometry and cached bind data remain
+  unchanged. The option is a reference skeleton change, not an added T-pose frame.
+
+The export options window keeps the same size when switching formats.
 
 BVH uses the same 52-bone hierarchy, metre units and Y up, including finger bones
 and terminal tips. Import into Blender with **Scale 1 / Forward -Z / Up Y**.
@@ -783,8 +870,9 @@ destination. **PEAR live mode does not support preview export.**
 
 ### Portable Blender projects
 
-Choose **Blender project + video (.blend)** in **File > Export...**, then choose
-an output filename. The exporter creates a **new subfolder** containing the
+For SMPL-based motion, choose **Blender project + video (.blend)** in
+**File > Export...**, then choose an output filename. The exporter creates a
+**new subfolder** containing the
 `.blend`, `video.mp4`, `camera_report.json` and instructions. Existing folders are
 retained; a numbered folder is chosen when needed. For several checked people
 or takes, each gets its own portable folder. The selected applied motion and
@@ -808,6 +896,21 @@ Movement scale and reconstruction error can prevent exact video alignment; this
 is not measured camera calibration. The export report records the choices.
 An optional T-pose adds one animation frame and delays the video/camera timeline
 by one to keep the original motion and video paired.
+
+### GEM-X SOMA Blender bundles
+
+GEM-X FBX and BVH contain the shaped SOMA Native77 skeleton and its 30 fps
+animation. BVH uses the **Generic / Blender** profile. Both formats offer
+**Place at origin** and a reference frame from the native rest pose.
+
+The native bundle opens in the **SOMA Motion** scene with an editable 77-bone
+reference rig and a separate baked mesh. **Input Video** is a synchronized
+video scene. Keep the `.blend`, `surface.pc2` and `video.mp4` together. The
+selected applied correction is included, and the rig's animation is keyed on
+bones. Edits to the rig leave the baked surface as exported.
+
+For character FBX or VMD, first retarget to a supported character. See the
+[GEM-X guide](models/GEMX.md#reconstruct-and-export).
 
 ### MAMMA whole-scene Blender projects
 
