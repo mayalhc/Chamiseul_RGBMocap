@@ -15,9 +15,13 @@ PROFILES = {
     'hand': dict(folder='runtime_hand', dev='.venv-hand', base='shared', python='3.10.22', packages={'torch':'2.7.1+cu128','numpy':'1.23.5','timm':'0.9.12','ultralytics':'8.3.80'}),
     'htd': dict(folder='runtime_htd', dev='.venv-htd', base='shared', python='3.10.22', packages={'torch':'2.7.1+cu128','numpy':'1.23.5','timm':'1.0.12'}),
     'exmr': dict(folder='runtime_exmr', dev='.venv-exmr', base=None, python='3.12.10', packages={'torch':'2.8.0+cu128','numpy':'2.3.5','scipy':'1.15.2','timm':'0.9.12'}),
+    # Optional face capture (Setup_Face.cmd). MediaPipe and its own numpy live
+    # in this overlay only; the shared runtime's packages are untouched.
+    'face': dict(folder='runtime_face', dev='.venv-face', base='shared', python='3.10.22', packages={'mediapipe':'1.2.2','numpy':'2.2.6'}),
 }
 
 def profile_for(stage, args=()):
+    if stage == 'face': return 'face'
     if stage.startswith('exmr'): return 'exmr'
     if stage.startswith('flow'): return 'flow'
     if stage == 'handflow': return 'hand'

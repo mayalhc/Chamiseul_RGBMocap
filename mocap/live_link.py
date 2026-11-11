@@ -43,6 +43,13 @@ A4[:3, :3] = A
 
 MAGIC_CHARACTER = b'RGFC'
 MAGIC_JOINTS = b'RGMF'
+# ARKit face values of the same frame, sent right after its body packet:
+# magic, frame (uint32), count (uint16), count little-endian floats.
+MAGIC_FACE = b'RGFA'
+# Every other person on screen, after the displayed one: magic, frame (uint32),
+# fps (float), slot (uint16, index into meta['people']), bone count (uint16),
+# then count row-major 4x4 matrices - the same deltas as a character packet.
+MAGIC_PERSON = b'RGFP'
 VERSION = 2
 DEFAULT_PORT = 9187
 
@@ -145,7 +152,39 @@ class LiveLink:
         return json.dumps({key: value for key, value in meta.items() if key != 'frame'},
                           sort_keys=True, default=str)
 
+    def set_face(self, values):
+        """Face values to send with the next body packet, or None for none."""
+        if values is None:
+            self._face = b''
+            return
+        values = np.asarray(values, '<f4').reshape(-1)
+        if not len(values) or not np.isfinite(values).all():
+            self._face = b''
+            return
+        self._face = (MAGIC_FACE + struct.pack('<IH', int(self._frame + 1) & 0xffffffff, len(values))
+                      + values.tobytes())
+
+    def set_people(self, people):
+        """Other people for the next packet: [(meta row, matrices), ...] or None."""
+        self._people_meta = []
+        blob = b''
+        for slot, (row, matrices) in enumerate(people or ()):
+            values = matrices_to_blender(matrices)
+            if values.shape[0] != len(row['palette']) or not np.isfinite(values).all():
+                continue
+            self._people_meta.append(dict(row, slot=slot, transform=transform_to_blender(row.get('transform'))))
+            blob += (MAGIC_PERSON + struct.pack('<IfHH', int(row.get('frame', 0)), float(row.get('fps', 30.0)),
+                                                slot, len(row['palette']))
+                     + values.astype('<f4').tobytes())
+        self._people = blob
+
     def _store(self, packet, meta):
+        packet = packet + getattr(self, '_face', b'') + getattr(self, '_people', b'')
+        people = getattr(self, '_people_meta', None)
+        if people:
+            # Per-person rows without their frame, so the handshake is resent
+            # only when who is on screen changes, not on every frame.
+            meta = dict(meta, people=[{k: v for k, v in row.items() if k != 'frame'} for row in people])
         with self._lock:
             self._latest = packet
             self._meta = meta

@@ -72,6 +72,9 @@ def main():
     if stage == 'gemx_contact_solve':
         from .gemx_contact_solver import main as solve
         return solve(sys.argv[2:], emit)
+    if stage=='face':
+        from .face_extract import main as face_main
+        return face_main()
     if stage=='character':
         from .retarget.worker import main as character_main
         return character_main(sys.argv[2:])

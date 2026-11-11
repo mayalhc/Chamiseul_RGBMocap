@@ -47,7 +47,7 @@ class MotionView(ViewportBase):
         self._pear_renderer=None
         self._pear_notice=QLabel(self);self._pear_notice.setWordWrap(True);self._pear_notice.setAlignment(Qt.AlignCenter);self._pear_notice.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._pear_notice.setStyleSheet("color:#dddddd; background:transparent; font-size:14px; padding:20px;");self._pear_notice.hide()
-        self.live_active=False;self.live_data=None;self.live_asset=None;self.live_frame_first=True;self.live_message="";self.live_key=None
+        self.live_active=False;self.live_data=None;self.live_asset=None;self.live_surface=None;self.live_frame_first=True;self.live_message="";self.live_key=None
         self.joints = None
         self.rotations = None
         self.mesh_frames = self.mesh_asset = self.mesh_renderer = None
@@ -691,17 +691,27 @@ class MotionView(ViewportBase):
     def correction_floor_geometry(self):
         if not getattr(self,'correction_floor_applicable',True):return None
         if not self.show_correction_floor or self.correction_floor is None:return None
+        # The floor stays where it is. Centring it on the hips of the current
+        # frame made the plate slide sideways with every step, so the feet and
+        # the floor moved together and nothing on screen read as fixed. It is
+        # placed once under the whole clip (or the whole people scene) instead.
         center=self.scene_center
+        half=(1.,1.)
         if self.people_mode:
-            if self.people_scene is None:return None
-            actors=self.scene_actors()
-            if not actors:return None
-            center=np.mean([self.scene_joint_points(take,frame)[0] for take,frame in actors],axis=0)
+            if self.people_scene is None or not self.scene_actors():return None
+            summary=getattr(self.people_scene,'summary',None)
+            if summary and 'center' in summary:center=np.asarray(summary['center'],float)
+            reach=max(1.,float(getattr(self,'scene_span',2.))*.5)
+            half=(reach,reach)
         elif self.joints is not None:
-            center=self.joints[min(self.index,len(self.joints)-1),0]
+            roots=np.asarray(self.joints)[:,0]
+            low,high=roots.min(axis=0),roots.max(axis=0)
+            center=(low+high)*.5
+            # Wide enough for every step of the clip, with room for the feet.
+            half=(max(1.,(high[0]-low[0])*.5+.6),max(1.,(high[2]-low[2])*.5+.6))
         else:return None
         from .floor_overlay import geometry
-        return geometry(center,self.correction_floor,self.grid_floor)
+        return geometry(center,self.correction_floor,self.grid_floor,half)
 
     def draw_correction_floor(self,painter,lines3d):
         geometry=self.correction_floor_geometry()

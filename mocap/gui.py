@@ -608,15 +608,42 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.reset_footlocks_button.setEnabled(self.slider.contact_edit_enabled)
         self.reset_trim_button.setEnabled(self.slider.trim_enabled)
         character=self.selected_character()
-        self.export_action.setText('Export Character...' if character else 'Export...')
-        self.export_action.setEnabled(not self.busy and (bool(character.get('takes')) and not character.get('needs_retarget') if character else self.project is not None and self.current_export() is not None))
-        self.export_action.setToolTip(tooltip_text("Choose a character export format and whether to include its mesh. PMX characters also support VMD motion." if character else "Export the displayed motion as FBX, BVH or a portable Blender project. Multiple people export separately; MAMMA also offers a whole-scene Blender bundle."))
+        motion_ready, motion_reason = self.motion_export_state()
+        if character:
+            self.export_action.setText('Export Character...')
+        elif motion_ready:
+            self.export_action.setText('Export Motion (FBX, BVH, Blender)...')
+        else:
+            self.export_action.setText('Export Motion (FBX, BVH, Blender)...')
+        self.export_action.setEnabled(not self.busy and (
+            bool(character.get('takes')) and not character.get('needs_retarget')
+            if character else motion_ready))
+        self.export_action.setToolTip(tooltip_text(
+            "Choose a character export format and whether to include its mesh. PMX characters also support VMD motion."
+            if character else
+            "Export the displayed motion as FBX, BVH or a portable Blender project. "
+            "Multiple people export separately; MAMMA also offers a whole-scene Blender bundle."
+            + ('' if motion_ready else '\n\nUnavailable: ' + motion_reason)))
         # FBX and GLB have their own File menu entries and stay visible whether
         # or not a character row is selected.
         exportable_character = not self.busy and not self.contact_saving and (
             bool(character.get('takes')) if character else any(c.get('takes') for c in getattr(self,'characters',[])))
         self.export_character_action.setEnabled(exportable_character)
         self.export_character_glb_action.setEnabled(exportable_character)
+        if exportable_character:
+            character_reason = 'Choose the format and whether to include the mesh.'
+        elif not getattr(self, 'characters', []):
+            character_reason = ('No character is imported. These entries export an imported character; '
+                                'the reconstructed person is exported with Export Motion above. '
+                                'Use File > Import Character to add one.')
+        elif not any(c.get('takes') for c in getattr(self, 'characters', [])):
+            character_reason = 'The character has no motion yet. Retarget a reconstructed person onto it first.'
+        else:
+            character_reason = 'Finish the current job or contact edit, then export again.'
+        for action in (self.export_character_action, self.export_character_glb_action):
+            base = action.toolTip().split('\n\nUnavailable:')[0]
+            action.setToolTip(tooltip_text(base + ('' if exportable_character
+                                                  else '\n\nUnavailable: ' + character_reason)))
         self.play_button.setEnabled(self.info is not None and self.video_readable)
         for action in self.open_actions:
             action.setEnabled(not self.busy)
@@ -826,6 +853,35 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.follow_source=self.follow_source_box.isChecked()
         self.motion_view.update()
         if hasattr(self,'camera_tools'):self.camera_tools.canvas.update()
+
+    def motion_export_state(self):
+        """Whether the displayed motion can be exported, and why not when it cannot."""
+        if self.project is None:
+            return False, 'Open a project or a video and reconstruct it first.'
+        try:
+            from .motion_tools import RESULTS, base_result, result_is_current
+            from .mixamo_data import current as preview_current
+        except Exception:                   # noqa: BLE001 - reported as unavailable
+            return False, 'Export support is unavailable in this installation.'
+        kind = self.active_result
+        for pending in ('exmr_pending.json', 'flowhmr_pending.json', 'flow_world_pending.json'):
+            if (self.project / pending).exists():
+                return False, ('The last reconstruction did not finish (it left '
+                               + pending + '). Run Reconstruct 3D again.')
+        if not (self.project / RESULTS[base_result(kind)][0]).is_file():
+            return False, 'There is no reconstruction in this project yet. Run Reconstruct 3D.'
+        if not result_is_current(self.project, kind):
+            return False, ('The stored motion no longer matches this project. '
+                           'Apply Correction, or run Reconstruct 3D again.')
+        if self.current_export() is None:
+            if preview_current(self.project, kind):
+                return False, 'The export file is missing. Prepare Preview again.'
+            # This is what an update leaves behind: the preview was built by
+            # earlier code, so it is refused rather than exported silently.
+            return False, ('This preview was made by an earlier version of the app. '
+                           'Press Prepare Preview to rebuild it (no inference is rerun), '
+                           'then export.')
+        return True, ''
 
     def preview_preparation_available(self):
         if self.model_choice.currentData()=='gemx':return False
@@ -2228,6 +2284,126 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         body = for_project(self.project)
         return (body, int(index), None) if body else None
 
+    # -- Face capture (ARKit) from the take's own video ------------------------
+    def face_takes(self):
+        """Take folders a face can be read from: input.mp4 beside tracking.npz."""
+        projects = [self.project] if self.project is not None else []
+        if self.people_state:
+            from .people_store import safe_child
+            projects += [safe_child(self.people_root, take['project'])
+                         for person in self.people_state['people']
+                         for take in person.get('takes', [])]
+        return [Path(p) for p in dict.fromkeys(projects)
+                if p is not None and (Path(p) / 'input.mp4').is_file()
+                and (Path(p) / 'tracking.npz').is_file()]
+
+    def extract_face(self):
+        """Read ARKit face values for every take of this project (face.npz)."""
+        if getattr(self, 'face_process', None) is not None:
+            self.status.setText('Face capture is already running.');return
+        takes = self.face_takes()
+        if not takes:
+            self.status.setText('Open a reconstructed project first: face capture reads the take videos.');return
+        args = []
+        for take in takes:
+            args += ['--take', str(take)]
+        try:
+            cmd = worker_command('face', *args)
+        except RuntimeError as error:
+            self.status.setText(str(error).replace('Run Setup to repair this installation.',
+                                                   'Run Setup_Face.cmd to install face capture.'))
+            return
+        process = QProcess(self);self.face_process = process
+        env = QProcessEnvironment.systemEnvironment();env.insert('PYTHONUTF8', '1');env.insert('PYTHONIOENCODING', 'utf-8')
+        process.setProcessEnvironment(env);process.setWorkingDirectory(str(ROOT))
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        self._face_buffer = ''
+        process.readyReadStandardOutput.connect(self.face_output)
+        process.finished.connect(self.face_finished)
+        self.status.setText('Face capture: starting (%d take(s))...' % len(takes))
+        process.start(cmd[0], cmd[1:])
+
+    def face_output(self):
+        process = getattr(self, 'face_process', None)
+        if process is None:return
+        self._face_buffer += bytes(process.readAllStandardOutput()).decode('utf-8', 'replace')
+        lines = self._face_buffer.split('\n');self._face_buffer = lines.pop()
+        for line in lines:
+            if not line.startswith('@@MOCAP@@'):continue
+            try:event = json.loads(line[9:])
+            except ValueError:continue
+            if event.get('type') == 'progress':
+                self.status.setText('%s: %d%%' % (event.get('message', 'Face capture'),
+                                                  100 * event.get('current', 0) // max(event.get('total', 1), 1)))
+            elif event.get('type') == 'done':
+                rows = event.get('takes', [])
+                found = sum(r.get('found', 0) for r in rows);frames = sum(r.get('frames', 0) for r in rows)
+                errors = [r['error'] for r in rows if 'error' in r]
+                self.status.setText(('Face capture: face found in %d of %d frames.' % (found, frames))
+                                    + (' ' + errors[0] if errors else ''))
+            elif event.get('type') == 'failed':
+                self.status.setText('Face capture: ' + event.get('message', 'failed'))
+
+    def face_finished(self, *_):
+        self.face_output()
+        self.face_process = None
+        self._face_cache = {}
+        self.log.append('Face capture: ' + self.status.text())
+
+    def live_face_values(self, index):
+        """ARKit values for the take on screen at this frame, or None."""
+        found = self.live_body_frame(index)
+        if found is None:
+            return None
+        body, frame, _transform = found
+        path = Path(body.project) / 'face.npz'
+        cache = self.__dict__.setdefault('_face_cache', {})
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            return None
+        cached = cache.get(path)
+        if cached is None or cached[0] != stamp:
+            import numpy as np
+            with np.load(path, allow_pickle=False) as data:
+                cached = cache[path] = (stamp, np.asarray(data['values'], np.float32))
+        values = cached[1]
+        if not len(values):
+            return None
+        return values[max(0, min(int(frame), len(values) - 1))]
+
+    def live_people(self, index):
+        """Every person on screen except the one sent as the main character.
+
+        The live link used to send only the selected person; the others now go
+        with it, each as its own base body, so Blender shows the whole scene.
+        """
+        from .live_body import for_project
+        view = self.motion_view
+        if not (getattr(view, 'people_mode', False) and view.people_scene is not None):
+            return []
+        actors = view.scene_actors()
+        if len(actors) < 2:
+            return []
+        chosen = next(((take, frame) for take, frame in actors if take.ident == view.scene_selected), None)
+        if chosen is None:
+            chosen = actors[0]
+        names = getattr(view, 'scene_names', {}) or {}
+        rows = []
+        for take, frame in actors:
+            if take is chosen[0]:
+                continue
+            body = for_project(take.project)
+            if body is None:
+                continue
+            label = str(names.get(take.ident) or 'Person %s' % take.ident)
+            rows.append((dict(ident=str(take.ident), label=label, blend=str(body.rest_file()),
+                              palette=list(body.names), armature='RGBMoCap ' + label,
+                              transform=getattr(take, 'transform', None), height=body.height,
+                              rest_format='npz', frame=int(frame), fps=float(body.fps)),
+                         body.matrices(frame)))
+        return rows
+
     def publish_live_frame(self, index):
         # Cascadeur is a second, independent receiver: it is updated before the
         # Blender branch below, which returns early whenever it has something
@@ -2237,6 +2413,17 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         if link is None or not link.active:
             return
         try:
+            # The take's face rides on the same packet as its body, so Blender
+            # gets both for the same frame.
+            try:
+                link.set_face(self.live_face_values(index))
+            except (OSError, ValueError, KeyError):
+                link.set_face(None)
+            try:
+                link.set_people(self.live_people(index))
+            except (OSError, ValueError, KeyError) as error:
+                link.set_people(None)
+                self.log.append('Live link: other people: ' + str(error))
             fps = self.info['fps'] if self.info else 30
             frames = self.info['frames'] if self.info else None
             # A character on screen is streamed as itself: its own rest file,
@@ -2562,11 +2749,18 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         target = self.slider.clip_in + playback_frame(self.play_anchor - self.slider.clip_in,
                                 elapsed, self.info["fps"], self.slider.clip_out - self.slider.clip_in,
                                 self.play_speed.currentData())
+        wrapped = target < self.slider.value()
         self.playback_tick = True
         try:
             self.slider.setValue(target)
         finally:
             self.playback_tick = False
+        if wrapped:
+            # The loop came back round to the clip start. The sound played out
+            # once and stopped there, so the second pass was silent; restarting
+            # the clock here also restarts the sound from the new playhead.
+            self.reset_play_clock()
+            return
         next_deadline = (math.floor(elapsed * rate + 1e-8) + 1) / rate
         remaining = next_deadline - self.play_clock.nsecsElapsed() / 1e9
         self.timer.start(max(1, math.ceil(remaining * 1000)))

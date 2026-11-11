@@ -8,15 +8,17 @@ LINES = np.asarray([segment for t in _ticks for segment in
 CORNERS = np.asarray([[-1,0,-1],[1,0,-1],[1,0,1],[-1,0,1]],float)
 
 
-def geometry(center,height,grid_height):
+def geometry(center,height,grid_height,half=(1.,1.)):
+    """half: half the plate's size along X and Z, so it can cover a whole clip."""
     offset=np.array([center[0],height,center[2]],float)
-    corners=CORNERS+offset
+    scale=np.array([float(half[0]),1.,float(half[1])])
+    corners=CORNERS*scale+offset
     # Keep the ruler beside the actor rather than at a corner that is often
     # outside a tightly framed viewport.
     a=offset+[.55,0,.1];b=a.copy();b[1]=grid_height
     ruler=np.asarray([[a,b],[a+[-.06,0,0],a+[.06,0,0]],
                       [b+[-.06,0,0],b+[.06,0,0]]])
-    return corners,LINES+offset,ruler
+    return corners,LINES*scale+offset,ruler
 
 
 def clip_polygon(points,eye,basis,near=.08):

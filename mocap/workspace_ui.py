@@ -72,6 +72,28 @@ class SettingsStack(QStackedWidget):
         return page.minimumSizeHint() if page else QSize(0,0)
 
 
+def _local_setting(key, default):
+    """A viewer preference from config/local.json (never stored in projects)."""
+    from .resource_safety import path, read_settings
+    try:
+        value = read_settings(path()).get(key, default)
+    except (OSError, ValueError):
+        return default
+    return value if isinstance(value, type(default)) else default
+
+
+def _save_local_setting(key, value):
+    from .resource_safety import path, read_settings
+    from .storage import atomic_json
+    try:
+        target = path();settings = read_settings(target)
+        settings[key] = value
+        target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json(target, settings)
+    except (OSError, ValueError):
+        pass
+
+
 def build_workspace(w):
     def button(text, callback, parent_layout):
         control = QPushButton(text)
@@ -267,9 +289,14 @@ def build_workspace(w):
         check.toggled.connect(toggle)
         viewport_footer.addWidget(check)
     w.follow_actor = QCheckBox("Follow Actor")
-    w.follow_actor.setToolTip(tooltip_text('Move the viewing camera with the person during playback. Does not change the animation.'))
-    w.follow_actor.setChecked(True)
+    w.follow_actor.setToolTip(tooltip_text('Move the viewing camera with the person during playback. Does not change the animation.\nThe choice is remembered: turn it off for a camera that stays still.'))
+    # Remembered across launches: switched off, the view stays still; reset to
+    # on at every start, the camera began following the pelvis again.
+    remembered = _local_setting('follow_actor', True)
+    w.follow_actor.setChecked(remembered)
+    w.motion_view.set_follow(remembered)
     w.follow_actor.toggled.connect(w.motion_view.set_follow)
+    w.follow_actor.toggled.connect(lambda value: _save_local_setting('follow_actor', bool(value)))
     viewport_footer.addWidget(w.follow_actor)
     viewport_footer.addStretch()
     motion_panel.layout().addWidget(w.viewport_footer)
@@ -715,7 +742,7 @@ def build_workspace(w):
     w.save_project_action.setShortcut('Ctrl+Shift+S')
     w.save_project_action.setToolTip(tooltip_text('Save a separate project folder with a new name and location, including its video, motion and settings. Continue working in the saved copy.'))
     file_menu.addSeparator()
-    w.export_action = file_menu.addAction("Export...", w.save_fbx)
+    w.export_action = file_menu.addAction("Export Motion (FBX, BVH, Blender)...", w.save_fbx)
     w.export_action.setToolTip(tooltip_text('Export the displayed motion as FBX, BVH or a portable Blender project. Multiple people export separately; MAMMA also offers a whole-scene Blender bundle.'))
     w.export_preview_action = file_menu.addAction('Export Preview...', w.save_preview)
     w.export_preview_action.setToolTip(tooltip_text('Save the selected input video beside the current 3D viewport as MP4 over the timeline trim. Keeps the current view, visible people/characters and viewport overlays. Includes source audio when available. Not available in PEAR live mode.'))
@@ -725,6 +752,8 @@ def build_workspace(w):
     w.export_character_glb_action = file_menu.addAction('Export Character as GLB...', lambda: w.export_character_from_menu('glb'))
     w.export_character_glb_action.setToolTip(tooltip_text('Save the selected character with its skeleton, animation and optional mesh as glTF binary (GLB) for Blender, Unity, Godot and web viewers.'))
     file_menu.addSeparator()
+    w.extract_face_action = file_menu.addAction('Capture Face from Video (ARKit)...', w.extract_face)
+    w.extract_face_action.setToolTip(tooltip_text('Read ARKit face values (blinks, mouth, smile, brows) for every take of this project from its own video, and send them with the body over Live Link to Blender.\nNeeds the optional face runtime: run Setup_Face.cmd once.\nA front-facing face works best; a face turned away or too far gives none.'))
     w.live_link_action = file_menu.addAction('Live Link to Blender')
     w.live_link_action.setCheckable(True)
     w.live_link_action.setToolTip(tooltip_text('Stream the displayed body pose to the RGB MoCap Bridge extension in Blender over localhost. Start it here, then press Start Live Link in Blender.\nScrubbing and playback in this window move the Blender character.'))
