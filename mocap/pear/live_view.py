@@ -48,6 +48,11 @@ class LiveRenderer:
             if self.mesh is None:self.mesh=RigRenderer()
             self.mesh.load(view.live_asset);self.mesh.deform(view.live_data['vertices'],view.live_key)
             self.mesh.draw(*view._paint_camera,view.width(),view.height(),(.64,.79,.86))
+        surface=getattr(view,'live_surface',None)
+        if surface is not None and 'surface' in view.live_data:
+            if self.mesh is None:self.mesh=RigRenderer()
+            self.mesh.load(surface);self.mesh.deform(view.live_data['surface'],view.live_key)
+            self.mesh.draw(*view._paint_camera,view.width(),view.height(),(.64,.79,.86))
         if view.show_bones:
             j=view.live_data['joints'];parents=view.live_parents
             revision=view.live_data.get('rig_revision',0)

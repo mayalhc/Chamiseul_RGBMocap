@@ -33,7 +33,7 @@ class FixedRig(SkeletonLayout):
         self.revision=0;self.clear()
 
     def clear(self):
-        self.rest=None;self.tip_offsets=None;self.basis=None;self.sole_offsets=None
+        self.rest=None;self.tip_offsets=None;self.basis=None;self.sole_offsets=None;self.rest_vertices=None;self.skin_weights=None
 
     def calibrate(self,body,flame):
         """Publish a complete replacement only after validating the current pose's anatomy."""
@@ -71,7 +71,19 @@ class FixedRig(SkeletonLayout):
             height=patch@up;low=patch[height<=np.percentile(height,8)]
             sole.append(np.median(low,axis=0)-rest[ankle])
         self.sole_offsets=np.asarray(sole,dtype='float32')
+        self.rest_vertices=np.ascontiguousarray(v,dtype='float32');self.skin_weights=np.ascontiguousarray(weights,dtype='float32')
         self.rest=rest.astype('float32');self.tip_offsets=offsets;self.basis=basis;self.revision+=1
+
+    def skin(self,joints,rotations):
+        """The calibrated body mesh posed by the final bone transforms, so surface and bones agree.
+
+        Linear blend of each joint's rigid transform; no pose correctives, no per-frame geometry model.
+        """
+        if self.rest_vertices is None:return None
+        r=np.asarray(rotations,dtype='float32')[:55];p=np.asarray(joints,dtype='float32')[:55]
+        t=p-np.einsum('jik,jk->ji',r,self.rest)
+        blend=self.skin_weights@np.concatenate([r.reshape(55,9),t],axis=1)
+        return np.ascontiguousarray(np.einsum('vij,vj->vi',blend[:,:9].reshape(-1,3,3),self.rest_vertices)+blend[:,9:],dtype='float32')
 
     def pose(self,body,camera):
         if self.rest is None:raise RuntimeError('PEAR bones have not been calibrated.')

@@ -11,7 +11,7 @@ def lock_position(pose,root):
     root=np.asarray(root,dtype=np.float32)
     if root.shape!=(3,) or not np.isfinite(root).all():raise ValueError('Invalid fixed pelvis position')
     result=dict(pose);delta=root-pose['joints'][0]
-    for name in ('joints','bounds','vertices'):
+    for name in ('joints','bounds','vertices','surface'):
         if name in pose:result[name]=np.ascontiguousarray(pose[name]+delta,dtype=np.float32)
     result['joints'][0]=root
     return result

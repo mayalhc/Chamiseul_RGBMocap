@@ -43,7 +43,13 @@ def receive(stream):
         p=arrays['parents']
         if p.dtype!=np.int32 or p.shape!=(55,) or p[0]!=-1 or np.any(p[1:]<0) or np.any(p[1:]>=np.arange(1,55)):raise ValueError('Invalid PEAR hierarchy')
     if kind=='topology' and meta.get('render_mode')=='bones':
-        if set(arrays)!={'parents'}:raise ValueError('Invalid bone topology payload')
+        mesh=('faces','offsets','neighbors')
+        if set(arrays) not in ({'parents'},{'parents',*mesh}):raise ValueError('Invalid bone topology payload')
+        if 'faces' in arrays:
+            n=int(meta['vertices']);f=arrays['faces'];o=arrays['offsets'];b=arrays['neighbors']
+            if not 1<=n<=200000 or f.ndim!=1 or len(f)%3 or o.shape!=(n+1,) or b.ndim!=1:raise ValueError('Invalid body surface topology')
+            if f.dtype!=np.uint32 or o.dtype!=np.uint32 or b.dtype!=np.uint32:raise ValueError('Invalid body surface topology type')
+            if not len(f) or f.max()>=n or (len(b) and b.max()>=n) or o[0]!=0 or int(o[-1])*2!=len(b) or np.any(o[1:]<o[:-1]):raise ValueError('Invalid body surface indices')
     elif kind=='topology':
         n=int(meta['vertices']);f=arrays['faces'];o=arrays['offsets'];b=arrays['neighbors'];p=arrays['parents']
         if not 1<=n<=200000 or f.ndim!=1 or len(f)%3 or o.shape!=(n+1,) or b.ndim!=1 or p.ndim!=1 or len(p)>512:raise ValueError('Invalid live topology')
@@ -58,6 +64,9 @@ def receive(stream):
         for k,minimum,limit in (('bounds' if bones else 'vertices',22,128 if bones else 200000),('joints',55,512)):
             a=arrays[k]
             if a.dtype!=np.float32 or a.ndim!=2 or a.shape[1]!=3 or not minimum<=len(a)<=limit:raise ValueError('Invalid live pose')
+        if 'surface' in arrays:
+            s=arrays['surface']
+            if s.dtype!=np.float32 or s.ndim!=2 or s.shape[1]!=3 or not 1<=len(s)<=200000:raise ValueError('Invalid live body surface')
         if bones and (int(meta.get('pose_id',0))<1 or int(meta.get('bone_revision',0))<1):raise ValueError('Invalid fixed-rig generation')
         r=arrays['rotations']
         if r.dtype!=np.float32 or r.shape!=(55,3,3) or np.max(abs(r.swapaxes(-1,-2)@r-np.eye(3)))>.005 or np.linalg.det(r).min()<.99:

@@ -419,6 +419,7 @@ class PearWorkspace(PearMultiWorkspace):
         if top:
             self._pear_ready=True
             meta,a=top
+            self.motion_view.live_surface=dict(key='pear-live-surface',topology_key='pear-live-surface',mode='raw',vertex_count=meta['vertices'],**{k:a[k] for k in ('faces','offsets','neighbors')}) if meta.get('render_mode')=='bones' and 'faces' in a else None
             self.motion_view.live_asset=dict(key='pear-live',render_mode='bones') if meta.get('render_mode')=='bones' else dict(key='pear-live',topology_key='pear-live',mode='raw',vertex_count=meta['vertices'],**{k:a[k] for k in ('faces','offsets','neighbors')})
             self.motion_view.live_parents=a['parents']
         if packet:

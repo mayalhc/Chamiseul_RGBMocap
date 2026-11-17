@@ -54,7 +54,13 @@ def main():
         placement=Placement();smooth=ParameterFilter()
         from .fixed_rig import CalibrationFrames
         references=CalibrationFrames();rig=model.rig;pose_id=0;reset_handled=0;reset_warning='';calibration_pose=None
-        send(pipe,{'type':'topology','render_mode':'bones','load_seconds':model.load_seconds},parents=np.asarray(model.parents,dtype='int32'))
+        # The body surface that the bones pose: topology once, vertices with every frame.
+        from ..mesh_data import adjacency
+        smplx_body=model.rig.calibrator.smplx
+        faces=smplx_body.faces_tensor.detach().cpu().numpy().astype('uint32')
+        count=int(smplx_body.lbs_weights.shape[0]);offsets,neighbors=adjacency(faces,count)
+        send(pipe,{'type':'topology','render_mode':'bones','load_seconds':model.load_seconds,'vertices':count},parents=np.asarray(model.parents,dtype='int32'),
+             faces=faces.reshape(-1),offsets=offsets,neighbors=neighbors)
         seen=-1;source=None;last_index=None;last_options=None;last_epoch=None;last_playing=False;frame_number=0
         while True:
             with condition:
@@ -169,6 +175,8 @@ def main():
                 v,j,rot,facing=rig.pose(result['body'],result['camera'])
                 v,j=placement.points(v,j,result['camera'],result['crop_bbox'],result['image_size'],smoothing=options[2],timestamp=timestamp,strength=strength)
                 arrays.update(bounds=np.ascontiguousarray(v[:,[0,2,1]]*[1,1,-1],dtype='float32'),joints=np.ascontiguousarray(j[:,[0,2,1]]*[1,1,-1],dtype='float32'),rotations=rot,bone_facing=facing)
+                surface=rig.skin(arrays['joints'],arrays['rotations'])
+                if surface is not None:arrays['surface']=surface
                 references.remember(pose_id,result['body'],result['flame'])
                 meta.update(render_mode='bones',pose_id=pose_id,bone_revision=rig.revision,calibration_pose=calibration_pose,
                     bone_reset_handled=reset_handled,bone_reset_warning=reset_warning)

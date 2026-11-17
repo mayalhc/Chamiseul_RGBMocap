@@ -2404,10 +2404,111 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                          body.matrices(frame)))
         return rows
 
+    def ue_scene_rows(self):
+        """Each person on screen, with the subject name Unreal should see."""
+        from .live_body import for_project
+        view = self.motion_view
+        if not (getattr(view, 'people_mode', False) and view.people_scene is not None):
+            return None
+        actors = view.scene_actors()
+        if not actors:
+            return []
+        names = getattr(view, 'scene_names', {}) or {}
+        rows = []
+        for position, (take, frame) in enumerate(actors):
+            body = for_project(take.project)
+            if body is None:
+                continue
+            subject = names.get(take.ident) or ('Person %d' % (position + 1))
+            rows.append((str(subject), body, int(frame), take.transform))
+        return rows
+
+    def publish_ue_frame(self, index):
+        """Hand the displayed frame to Unreal, one subject per person."""
+        link = getattr(self, 'ue_link', None)
+        if link is None or not link.active:
+            return
+        try:
+            rows = self.ue_scene_rows()
+            if rows is not None:
+                for subject, body, frame, _transform in rows:
+                    if getattr(self, '_ue_body', None) is not body:
+                        link.links[subject].set_rest_frames(getattr(body, 'rest_frames', None)) \
+                            if subject in getattr(link, 'links', {}) else None
+                    link.publish(subject, body.names, body.rest, body.parents,
+                                 body.frames[frame], frame=frame,
+                                 rest_rotations=getattr(body, 'rest_frames', None),
+                                 display_frames=getattr(body, 'display', None))
+                return
+            found = self.live_body_frame(index)
+            if found is None:
+                return
+            body, body_index, _transform = found
+            subject = getattr(self, 'ue_subject_name', None) or 'RGBMoCap'
+            target = link.links.get(subject) if hasattr(link, 'links') else link
+            if target is None:
+                return
+            if getattr(self, '_ue_body', None) is not body:
+                self._ue_body = body
+                # body.frames holds the take's own world matrices, so the rest
+                # that pairs with them is rest_frames, not rest_frames @ display.
+                rest_frames = getattr(body, 'rest_frames', None)
+                target.set_rest_frames(rest_frames)
+            target.publish(body.names, body.rest, body.parents, body.frames[body_index],
+                           frame=int(body_index),
+                           rest_rotations=getattr(body, 'rest_frames', None),
+                           display_frames=getattr(body, 'display', None))
+        except Exception as error:          # noqa: BLE001 - reported, not raised
+            self.log.append('Unreal live: ' + str(error))
+
+    def send_base_character_to_unreal(self):
+        """File > Send Base Character to Unreal: import the T-pose body there."""
+        from .ue_link import import_base_character
+        from .paths import ROOT
+        self.status.setText('Unreal: importing the base character...')
+
+        def work():
+            try:
+                outcome = import_base_character(ROOT)
+            except Exception as error:          # noqa: BLE001 - reported in the window
+                outcome = (False, str(error))
+            self.log.append('Unreal: ' + outcome[1])
+            self.status.setText('Unreal: ' + outcome[1])
+
+        threading.Thread(target=work, name='rgbmocap-unreal-base', daemon=True).start()
+
+    def toggle_ue_link(self, enabled):
+        """File > Live Link to Unreal: serve this take to UE5 Live Link."""
+        from .ue_link import UnrealLink, DEFAULT_PORT
+        link = getattr(self, 'ue_link', None)
+        if not enabled:
+            if link is not None:
+                link.stop()
+            self.status.setText('Unreal live link stopped.')
+            return
+        if link is None:
+            from .ue_link import MultiLink
+            self.ue_link = link = MultiLink(DEFAULT_PORT)
+        rows = self.ue_scene_rows()
+        subjects = [row[0] for row in rows] if rows else [getattr(self, 'ue_subject_name', 'RGBMoCap')]
+        ok, message = link.start(subjects)
+        self.log.append('Unreal live: ' + message)
+        if not ok:
+            self.status.setText(message)
+            action = getattr(self, 'ue_link_action', None)
+            if action is not None:
+                action.blockSignals(True)
+                action.setChecked(False)
+                action.blockSignals(False)
+            return
+        self.status.setText(message + '. In Unreal: Live Link > Add Source > MotionForge.')
+        self.publish_ue_frame(getattr(self.motion_view, 'index', 0) or 0)
+
     def publish_live_frame(self, index):
-        # Cascadeur is a second, independent receiver: it is updated before the
-        # Blender branch below, which returns early whenever it has something
-        # to send.
+        # Every receiver is independent: Unreal and Cascadeur are updated before
+        # the Blender branch below, which returns early whenever it has
+        # something to send.
+        self.publish_ue_frame(index)
         self.publish_cascadeur_frame(index)
         link = getattr(self, 'live_link', None)
         if link is None or not link.active:
@@ -3860,6 +3961,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             self.close_source_fetch()
         if getattr(self, 'live_link', None) is not None:
             self.live_link.stop()
+        if getattr(self, 'ue_link', None) is not None:
+            self.ue_link.stop()
         if getattr(self, 'cascadeur_link', None) is not None:
             self.cascadeur_link.stop()
             try:

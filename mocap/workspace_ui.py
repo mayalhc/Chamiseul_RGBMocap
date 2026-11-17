@@ -761,6 +761,13 @@ def build_workspace(w):
     w.send_character_action = file_menu.addAction('Send Base Character to Cascadeur')
     w.send_character_action.setToolTip(tooltip_text('Put the prepared T-pose base body into a new Cascadeur scene, then check it stands correctly.\nCascadeur does not accept this app\'s own FBX, so this uses the T-pose body exported through Blender.\nRun this once before Live Link to Cascadeur; the link composes every pose onto that rest.'))
     w.send_character_action.triggered.connect(w.send_base_character)
+    w.ue_base_action = file_menu.addAction('Send Base Character to Unreal')
+    w.ue_base_action.setToolTip(tooltip_text('Import the T-pose RGB MoCap body into the open Unreal project through its editor MCP endpoint (\\Game\\RGBMoCap).\\nDo this once, then Live Link to Unreal drives it; every character with a Live Link component on the same subject follows the same stream.'))
+    w.ue_base_action.triggered.connect(w.send_base_character_to_unreal)
+    w.ue_link_action = file_menu.addAction('Live Link to Unreal (UE5)')
+    w.ue_link_action.setCheckable(True)
+    w.ue_link_action.setToolTip(tooltip_text('Stream the displayed take straight into Unreal Engine 5.9 as a Live Link subject (MotionForge Live Link plugin).\\nIn Unreal: Live Link panel > Add Source > MotionForge > 127.0.0.1:9560, then drive a Quinn or a MetaHuman through the plugin retargeter.\\nBone names and the capture space are converted on the way out; nothing is exported.'))
+    w.ue_link_action.toggled.connect(w.toggle_ue_link)
     w.cascadeur_link_action = file_menu.addAction('Live Link to Cascadeur')
     w.cascadeur_link_action.setCheckable(True)
     w.cascadeur_link_action.setToolTip(tooltip_text('Drive the character in Cascadeur from this window over localhost, with no file to export and re-import.\nStart Cascadeur, import the character you exported from here, then start this. Play, pause or scrub here and the Cascadeur take is written as you watch.\nLeave Cascadeur closed and nothing happens; the link is only created while Cascadeur is answering.'))
@@ -783,6 +790,8 @@ def build_workspace(w):
         'Record from Webcam...': 'Record a clip from a camera and open it like any video.',
         'Live Link to Blender': 'Stream the displayed pose to Blender on localhost.',
         'Send Base Character to Cascadeur': 'Import the T-pose base body into a new Cascadeur scene.',
+        'Send Base Character to Unreal': 'Import the T-pose base body into the open Unreal project.',
+        'Live Link to Unreal (UE5)': 'Stream the displayed take into Unreal Live Link on localhost.',
         'Live Link to Cascadeur': 'Write the displayed pose into an open Cascadeur scene on localhost.',
         'Exit': 'Close RGB MoCap.',
         'Check System': 'Check hardware and required software. Results appear in the Console.',

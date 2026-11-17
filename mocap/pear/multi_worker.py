@@ -223,6 +223,9 @@ class MultiPreview:
             arrays,foot_metrics=self.foot_lock.apply(arrays,rig,timestamp,
                 enabled=bool(request.get('foot_lock',True) and self.fusion is not None),move_root=request.get('world_position',True))
         else:self.foot_lock.reset()
+        if arrays:
+            surface=rig.skin(arrays['joints'],arrays['rotations'])
+            if surface is not None:arrays['surface']=surface
         valid=bool(arrays);self.pose_id+=1
         reference_packet=packets[selected] or (available[0] if available else None)
         if reference_packet:self.references.remember(self.pose_id,reference_packet['body'],reference_packet['flame'])
