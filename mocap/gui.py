@@ -16,6 +16,7 @@ import uuid
 from collections import deque
 from pathlib import Path
 import time
+import traceback
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QProcess, QProcessEnvironment, QTimer, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QShortcut, QTextOption
@@ -61,6 +62,8 @@ STAGES["handflow"] = "Infer Fingers / HandFlow"
 STAGES['correct'] = 'Motion Correction'
 from .workspace_ui import build_workspace
 from .people_ui import PeopleWorkspace
+from .face_ui import FaceWorkspace
+from .stream_ui import StreamWorkspace
 from .project_save_ui import ProjectSaving
 from .project_workspace_ui import ModelWorkspace
 from .mamma_ui import MammaWorkspace
@@ -71,7 +74,7 @@ from .gemx_ui import GemXWorkspace
 STAGES['gemx_reconstruct']='Reconstruct Native SOMA / GEM-X'
 STAGES['gemx_correct']='Motion Correction / GEM-X'
 STAGES['save_project']='Save Project As'
-STAGES.update(people='Find People',person='Prepare Person Motion')
+STAGES.update(people='Find People',sam31_people='Find People with SAM 3.1',person='Prepare Person Motion',face_track='Track Face')
 STAGES.update(flow_camera='Estimate Scene Camera / VGGT-Omega', flow_features='Extract Body and Hand Features / SAM', flowhmr='Reconstruct Motion / FlowHMR', flow_export='Prepare FlowHMR Preview and FBX', import_model='Import Model')
 STAGES.update(exmr_preprocess='ExMR Body, Hand and Foot Keypoints',exmr_features='ExMR Body and Hand Features',exmr='Reconstruct Motion / ExMR')
 
@@ -177,6 +180,9 @@ class ModelsDialog(QDialog):
                 {key for stage in (*self.tool.stages(refine=True, footmr=True, handflow=True),'people') for key in STAGE_REQUIREMENTS.get(stage, ())})
         if self.tool.key=='pear':keys.update(STAGE_REQUIREMENTS['pear_align'])
         if self.tool.key=='prompthmr':keys.update(STAGE_REQUIREMENTS['prompthmr_camera_assets'])
+        from .sam31_runtime import SUPPORTED
+        if self.tool.key in SUPPORTED and window.people_tracker.currentData() == 'sam31':
+            keys.update(STAGE_REQUIREMENTS['sam31_people'])
         if self.tool.key=='flowhmr':
             keys.add('flow_metadata')
             if window.flow_hamer.isChecked():
@@ -207,6 +213,11 @@ class ModelsDialog(QDialog):
         self.open_models_folder_button.clicked.connect(self.open_models_folder)
         folder.addWidget(self.open_models_folder_button)
         layout.addLayout(folder)
+        if self.tool.key in SUPPORTED and window.people_tracker.currentData() == 'sam31':
+            sam_note = QLabel('SAM 3.1 is optional. Close RGB MoCap and run Setup_SAM31.cmd once. '
+                              'Use Auto Download on the SAM 3.1 row for the public 1.75 GB checkpoint.')
+            sam_note.setWordWrap(True)
+            layout.addWidget(sam_note)
         if self.tool.key=='mamma':
             from .mamma_manager import runtime_panel
             layout.addWidget(runtime_panel(self))
@@ -396,7 +407,7 @@ class ModelsDialog(QDialog):
 
     def pending_downloads(self):
         return [model for model in self.models
-                if (model.drive_id or model.download_url) and not ready(model)]
+                if model.key != 'sam31_people' and (model.drive_id or model.download_url) and not ready(model)]
 
     def start_download_all(self):
         if self.window.busy:
@@ -448,7 +459,7 @@ from .prompthmr_ui import PromptHMRWorkspace
 from .pear_ui import PearWorkspace
 from .preview_export_ui import PreviewExportWorkspace
 
-class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWorkspace,MammaWorkspace,CharacterWorkspace,ModelWorkspace,ProjectSaving,PeopleWorkspace,QMainWindow):
+class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWorkspace,MammaWorkspace,CharacterWorkspace,ModelWorkspace,ProjectSaving,PeopleWorkspace,StreamWorkspace,FaceWorkspace,QMainWindow):
     def __init__(self, video: Path | None = None):
         super().__init__()
         self.init_mamma()
@@ -494,6 +505,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.play_clock = QElapsedTimer()
         self.timer_resolution = PlaybackTimerResolution()
         self.play_anchor = 0
+        self.play_cycle = 0
+        self.preview_audio = None
         self.playback_tick = False
         self.presented_times = deque()
         self.source_audio = SourceAudio(self)
@@ -549,6 +562,9 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
     @read_only_checks
     def update_readiness(self):
         self.export_preview_action.setEnabled(self.preview_export_available())
+        self.track_face.setVisible(not self._pear_active)
+        self.face_overlay.setVisible(not self._pear_active)
+        self.track_face.setEnabled(not self.busy and not self.contact_saving)
         if self._pear_active:
             if hasattr(self,'camera_tools'):self.camera_tools.sync()
             self.pear_sync_controls();return
@@ -609,20 +625,22 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.reset_trim_button.setEnabled(self.slider.trim_enabled)
         character=self.selected_character()
         motion_ready, motion_reason = self.motion_export_state()
+        # Checked people and takes export from the Export dialog even when the displayed take cannot.
+        motion_ready = motion_ready or self.source_export_available()
         if character:
             self.export_action.setText('Export Character...')
         elif motion_ready:
-            self.export_action.setText('Export Motion (FBX, BVH, Blender)...')
+            self.export_action.setText('Export...')
         else:
-            self.export_action.setText('Export Motion (FBX, BVH, Blender)...')
+            self.export_action.setText('Export...')
         self.export_action.setEnabled(not self.busy and (
             bool(character.get('takes')) and not character.get('needs_retarget')
             if character else motion_ready))
         self.export_action.setToolTip(tooltip_text(
             "Choose a character export format and whether to include its mesh. PMX characters also support VMD motion."
             if character else
-            "Export the displayed motion as FBX, BVH or a portable Blender project. "
-            "Multiple people export separately; MAMMA also offers a whole-scene Blender bundle."
+            "Export the current take or all takes of checked people as FBX, BVH or a portable Blender project. "
+            "MAMMA also offers a whole-scene Blender bundle."
             + ('' if motion_ready else '\n\nUnavailable: ' + motion_reason)))
         # FBX and GLB have their own File menu entries and stay visible whether
         # or not a character row is selected.
@@ -837,6 +855,13 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                 return candidate
         return kind
 
+    def source_export_available(self):
+        if self._pear_active or self.project is None:
+            return False
+        if self.people_state and any(person.get('takes') for person in self.people_state['people']):
+            return True
+        return self.current_export() is not None
+
     def current_export(self, kind=None, project=None):
         if self._pear_active:return None
         kind=self.active_result if kind is None else kind
@@ -851,6 +876,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.motion_view.show_bones=self.bone_overlay.isChecked()
         self.motion_view.show_character_bones=self.character_bones.isChecked()
         self.follow_source=self.follow_source_box.isChecked()
+        self.motion_view.show_faces=self.face_overlay.isChecked()
         self.motion_view.update()
         if hasattr(self,'camera_tools'):self.camera_tools.canvas.update()
 
@@ -938,6 +964,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.motion_correction.blockSignals(False)
         self.refresh_results()
         self.request_people_scene()
+        if self.people_state:
+            self.populate_person_takes()
         self.update_readiness()
 
     def choose_video(self):
@@ -2084,12 +2112,14 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
     def choose_project(self):
         name, _ = QFileDialog.getOpenFileName(self, "Open Project", str(PROJECTS), "Project (project.json)")
         if name:
-            from .project_workspace import root_for
+            from .project_workspace import read, root_for
             try:
-                project=Path(name).parent
-                if root_for(project) is None:
+                project=Path(name).parent.resolve()
+                root=root_for(project)
+                if root is None:
                     raise ValueError('This project uses the previous folder format. Open its video to create a new model-folder project.')
-                self.load_project(project)
+                if self.load_project(project) and project!=root:
+                    self.restore_track_face(read(root).get('view',{}).get('track_face',False))
             except (OSError,ValueError,KeyError) as error:self.status.setText('Cannot open project: '+str(error))
 
     @batch_readiness
@@ -2201,6 +2231,10 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             self.seek(self.slider.value())
         self.update_readiness()
         self.mamma_project_loaded(project,manifest)
+        if workspace is not None:
+            self.restore_track_face(workspace.get('track_face',False))
+        else:
+            self.update_face_overlay()
         return True
 
     def seek(self, index):
@@ -2754,6 +2788,9 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.play_anchor = self.slider.value()
         self.play_clock.start()
         self.presented_times.clear()
+        first, end = self.slider.clip_in, self.slider.clip_out
+        length = max(1, end - first)
+        self.play_cycle, local_frame = divmod(self.play_anchor - first, length)
         if self.timer.isActive() and self.info:
             self.timer.start(max(1, math.ceil(1000 / (self.info['fps'] * self.play_speed.currentData()))))
             # The playhead or the speed moved: the sound restarts from there.
@@ -2761,6 +2798,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
 
     def stop_playback(self):
         self.timer.stop()
+        if self.preview_audio is not None:
+            self.preview_audio.pause()
         self.timer_resolution.release()
         self.source_audio.stop()
         self.set_playback_indicator(False)
@@ -2872,6 +2911,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         if hasattr(self,'camera_tools'):self.camera_tools.close()
         self.shutdown_mamma()
         self.stop_playback()
+        if self.preview_audio is not None:
+            self.preview_audio.close()
         if hasattr(self,'character_loader'):
             self.character_loader.close();self.character_assets.clear()
         self.scene_loader.stop()
@@ -2895,7 +2936,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             self.stop_playback()
         super().hideEvent(event)
 
-    def input_jobs(self, stages, result=None):
+    def input_jobs(self, stages, result=None, *, people_options=None):
         if MOTION_TOOLS[self.model_choice.currentData()].input_setup_only:
             self.status.setText('MAMMA camera input setup is available; reconstruction is not integrated yet.')
             return
@@ -2905,13 +2946,14 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         if self.info is None or not self.video_readable:
             self.status.setText("Wait for the video preview to finish opening.")
             return
-        if 'people' not in stages and self._single_actor and not self._single_actor['checked']:
+        discovery = any(stage in ('people', 'sam31_people') for stage in stages)
+        if not discovery and self._single_actor and not self._single_actor['checked']:
             self.status.setText('Check Person 1 in the People list to reconstruct it.')
             return
-        if 'people' not in stages and self.input_person_jobs(stages,result):
+        if not discovery and self.input_person_jobs(stages,result):
             return
         unavailable = [model for stage in stages for model in ([] if self.model_choice.currentData()=='flowhmr' and stage=='flow_camera' and self.flow_sampling.currentData()==-1 else missing('flow_export' if self.model_choice.currentData()=='flowhmr' and stage in ('correct','export') else stage))]
-        if self.model_choice.currentData()=='flowhmr' and self.flow_hamer.isChecked():
+        if 'sam31_people' not in stages and self.model_choice.currentData()=='flowhmr' and self.flow_hamer.isChecked():
             from .flow_hamer import MODEL_KEYS
             from .models import BY_KEY
             unavailable += [BY_KEY[k] for k in MODEL_KEYS if not ready(BY_KEY[k])]
@@ -2940,11 +2982,18 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                                  '--foot-lock',str(int(self.foot_lock.isChecked())),'--hand-lock',str(int(self.hand_lock.isChecked())),
                                  '--occlusion-fill',str(int(self.occlusion_fill.isChecked())),
                                  '--pelvis-offset',str(self.pelvis_offset.value())]
+        jobs = [('prepare', prepare_args)]
         if self.people_root is None and 'correct' in stages and RECONSTRUCTION_STAGES & set(stages):
             self._single_result_kind = result or self.active_result
             self._ground_after_single_batch = True
-        self.start_jobs([("prepare", prepare_args)]
-                        + [(stage, ["--result", result] if stage in {"export", "flow_export", "footmr", "handflow", "correct"} and result else None) for stage in stages])
+        for stage in stages:
+            arguments = None
+            if stage == 'sam31_people':
+                arguments = people_options
+            elif stage in {'export', 'flow_export', 'footmr', 'handflow', 'correct'} and result:
+                arguments = ['--result', result]
+            jobs.append((stage, arguments))
+        self.start_jobs(jobs)
 
     def ground_lone_actor_after_reconstruction(self):
         """Ensure a lone actor's feet land on its flat floor after reconstruction.
@@ -3238,6 +3287,14 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.cleanup_batch_request()
         self.guard_timer.stop()
         self.processing_guard = None
+        if not self.jobs and not self.failed and not self.cancelled:
+            if self.current_stage in ('export', 'flow_export') and self.project is not None and not self._people_batch:
+                try:
+                    metadata = json.loads((self.project / 'export.json').read_text(encoding='utf-8'))
+                    self.set_active_result(metadata.get('result_kind', 'refined'))
+                except (OSError, ValueError, KeyError) as error:
+                    self.worker_completion_error(error)
+            self.queue_face_after_reconstruction()
         if not self.jobs or self.failed or self.cancelled:
             self.task_timer.stop()
             elapsed = (max(0., time.monotonic() - self._batch_started_at)
@@ -3263,7 +3320,6 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             if self.current_stage=='save_project':
                 self.finish_project_save()
                 return
-            person_batch=self._people_batch
             completion_message=self.status.text()
             self.finish_people_jobs()
             # A finished reconstruction of a lone actor gets one grounding check.
@@ -3273,9 +3329,6 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                     QTimer.singleShot(0,self.ground_lone_actor_after_reconstruction)
             if self.failed or self.cancelled:self.status.setText(completion_message)
             if not self.failed and not self.cancelled:
-                if self.current_stage in ("export",'flow_export') and self.project is not None and not person_batch:
-                    metadata = json.loads((self.project / "export.json").read_text(encoding="utf-8"))
-                    self.set_active_result(metadata.get("result_kind", "refined"))
                 if self.current_stage == "diagnose" and self.hardware_summary:
                     self.status.setText(self.hardware_summary)
                 elif self.current_stage == "pva":
@@ -3284,7 +3337,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                     self.status.setText("Downloads complete. Check Model Manager for any required imports.")
                 elif self.current_stage == "import_model":
                     self.status.setText("Model setup complete.")
-                elif self.current_stage not in ('people','person'):
+                elif self.current_stage not in ('people','sam31_people','person'):
                     self.status.setText("Complete. Play the result or open the project folder.")
                 if self._batch_has_motion and elapsed is not None:
                     seconds = round(elapsed)
@@ -3328,7 +3381,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self._batch_inner_stage=stage
         if arguments is None:
             arguments = ["--project", str(self.project)]
-        elif stage in {"export", "footmr", "handflow", "correct", 'flow_export'} and "--project" not in arguments:
+        elif stage in {"export", "footmr", "handflow", "correct", 'flow_export', 'sam31_people'} and "--project" not in arguments:
             arguments = ["--project", str(self.project), *arguments]
         self.job_project = Path(arguments[arguments.index('--project')+1]) if '--project' in arguments else None
         if stage=='track':self.begin_single_tracking(self.job_project)
@@ -3346,6 +3399,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.task_timer.start();self.update_task_progress()
         self.progress.setRange(0, 0)
         self.buffer = ""
+        self._worker_event_failed = False
         self._stdout_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._stderr_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._stderr_buffer = ""
@@ -3415,7 +3469,15 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                     atomic_json(path,state)
                 except (OSError,ValueError) as error:self.log.append('Could not save stopped stage: '+str(error))
 
+    def worker_completion_error(self, error):
+        self._worker_event_failed = True
+        self.failed = True
+        from .storage import path_error_message
+        self.status.setText('Processing failed while applying worker output. '+path_error_message(error))
+        self.log.append(traceback.format_exc().rstrip())
+
     def read_stdout(self, final=False):
+        if self.process is None:return
         if self.processing_guard:self.processing_guard.output()
         self.buffer += self._stdout_decoder.decode(bytes(self.process.readAllStandardOutput()), final=final)
         if final and self.buffer and not self.buffer.endswith("\n"):self.buffer += "\n"
@@ -3423,15 +3485,26 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             self.buffer = self.buffer[-65536:]
         while "\n" in self.buffer:
             line, self.buffer = self.buffer.split("\n", 1)
-            if line.startswith("@@MOCAP@@"):
-                try:
-                    self.handle_event(json.loads(line[len("@@MOCAP@@"):]))
-                except (ValueError, KeyError) as error:
-                    self.log.append(str(error))
-            elif line.strip():
-                self.log.append(line.rstrip())
+            if not line.startswith("@@MOCAP@@"):
+                if line.strip():self.log.append(line.rstrip())
+                continue
+            try:
+                event = json.loads(line[len("@@MOCAP@@"):])
+            except ValueError as error:
+                self.log.append('Invalid worker message: ' + str(error))
+                continue
+            if not isinstance(event, dict) or not isinstance(event.get('type'), str):
+                self.log.append('Invalid worker event.')
+                continue
+            if self._worker_event_failed:
+                continue
+            try:
+                self.handle_event(event)
+            except Exception as error:
+                self.worker_completion_error(error)
 
     def read_stderr(self, final=False):
+        if self.process is None:return
         if self.processing_guard:self.processing_guard.output()
         text = self._stderr_decoder.decode(bytes(self.process.readAllStandardError()), final=final)
         self._stderr_buffer = (self._stderr_buffer + text.replace("\r", "\n"))[-65536:]
@@ -3452,6 +3525,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             self.task_state.update(dict(current=0,total=0,phase=f"batch:{event['phase']}:{event['index']}",message='Loading actor data'),time.monotonic())
             self.status.setText(self._task_actor+' · '+STAGES.get(event['stage'],event['stage']))
             self.update_task_progress()
+        elif kind == 'face_ready':
+            self.update_face_overlay(refresh=True)
         elif kind == 'gemx_corrected':
             if self.project == Path(event['project']):
                 self.set_active_result('corrected_initial')
@@ -3496,7 +3571,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         elif kind in {"failed", "blocked"}:
             self.failed = True
             self.task_timer.stop();self.task_info.setText('Failed')
-            self.status.setText("Processing failed. " + event.get("message", "See the console for details."))
+            label = 'Face tracking failed. ' if self.current_stage == 'face_track' else 'Processing failed. '
+            self.status.setText(label + event.get('message', 'See the console for details.'))
             self.log.append(self.status.text())
         elif kind == "complete":
             if not event.get('batch_inner'):self.task_state.cached|=bool(event.get('cached',False))
@@ -3504,17 +3580,32 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.log.ensureCursorVisible()
 
     def process_finished(self, code, _):
-        self.read_stdout(final=True)
-        self.read_stderr(final=True)
-        if code != 0 and not self.cancelled:
-            self.failed = True
-            if "failed" not in self.status.text():
-                self.status.setText("Processing stopped. See the console for details.")
-        self.process.deleteLater()
-        self.process = None
-        self.task_state.finish(time.monotonic(),not self.failed and not self.cancelled and code==0)
-        self.cleanup_fbx_export()
-        self.next_job()
+        if self.process is None:return
+        try:
+            try:
+                self.read_stdout(final=True)
+            finally:
+                self.read_stderr(final=True)
+            if code != 0 and not self.cancelled:
+                self.failed = True
+                if "failed" not in self.status.text():
+                    self.status.setText("Processing stopped. See the console for details.")
+        except Exception as error:
+            self.worker_completion_error(error)
+        finally:
+            process, self.process = self.process, None
+            try:
+                if process is not None:process.deleteLater()
+                self.cleanup_fbx_export()
+            except Exception as error:
+                self.worker_completion_error(error)
+            finally:
+                try:
+                    self.task_state.finish(time.monotonic(),not self.failed and not self.cancelled and code==0)
+                except Exception as error:
+                    self.worker_completion_error(error)
+                finally:
+                    self.next_job()
 
     def process_error(self, error):
         if error == QProcess.FailedToStart:
@@ -3538,6 +3629,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
 
     def cancel_job(self):
         self.pear_leave()
+        self._stream_timer.stop()
+        self.close_stream()
         self.pear_stop_scan()
         if self.character_process is not None:
             self.cancel_character();return
@@ -3620,6 +3713,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                             f'The range is clipped to the footage with the person in it.')
 
     def refresh_results(self):
+        self.update_face_overlay()
         if self.project:
             signature = project_signature(self.project)
             if signature != self.preview_signature:
@@ -3629,6 +3723,10 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                 self.apply_preview()
 
     def clear_preview(self):
+        self._face_overlay_key=None
+        self.motion_view.face_archive=None
+        self.motion_view.face_surfaces.clear()
+        self.motion_view.face_manifests.clear()
         self.preview_help.setText('')
         self.pelvis_auto_note.setText('Automatic lowering varies by frame.')
         self.data_loader.cancel()
@@ -3835,43 +3933,87 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
     def save_fbx(self):
         if self.selected_character() is not None:
             self.export_character(self.selected_character());return
-        if self.busy or self.current_export() is None:
+        if self.busy or not self.source_export_available():
             self.status.setText('Selected motion is unavailable or has pending correction edits. Apply Correction / Prepare Preview before exporting.');return
         from .source_export_dialog import SourceExportDialog
-        dialog=SourceExportDialog(self)
+        people=self.checked_people() if self.people_state is not None else []
+        take_count=sum(len(person.get('takes',[])) for person in self.people_state['people']) if self.people_state else 0
+        show_take_scope=len(people)>1 or take_count>1 or (take_count==1 and not people)
+        dialog=SourceExportDialog(self,show_take_scope=show_take_scope,default_all_takes=len(people)>1,
+                                  validate=self.validate_source_export,
+                                  take_choices=lambda: self.take_choices(validate_scene=True))
         if dialog.exec()!=QDialog.Accepted:return
-        if self.current_export() is None:
-            self.status.setText('Motion changed while choosing export options. Apply Correction / Prepare Preview first.');return
         self._source_export_options=dialog.options()
         if self._source_export_options['format']=='blend_scene':
             from .blend_export_ui import export_scene
-            export_scene(self);return
-        if self.export_checked_people():return
+            export_scene(self,dialog.checked_exports);return
+        if dialog.checked_exports is not None:
+            self.export_checked_people(dialog.checked_exports)
+            return
         source = self.current_export()
-        if source:
-            from .person_names import export_stem
-            fmt=self._source_export_options['format']
-            default=export_stem(self.export_person_name(self.project))+'.'+fmt
-            name, _ = QFileDialog.getSaveFileName(self, "Export", default, fmt.upper()+" (*."+fmt+")",options=QFileDialog.DontConfirmOverwrite if fmt=='blend' else QFileDialog.Option(0))
-            if name:
-                if not Path(name).suffix:name+='.'+fmt
-                self.submit_fbx_exports([(self.project,self.active_result,source,Path(name))])
+        if source is None:
+            self.status.setText('Motion changed while choosing export options. Apply Correction or run Prepare Preview first.')
+            return
+        from .person_names import export_stem
+        current=self.take_choices(paths={self.project})
+        stem=current[0].stem if current else export_stem(self.export_person_name(self.project))
+        self.export_source_take(self.project,source,stem)
+
+    def export_source_take(self, project, source, stem):
+        fmt=self._source_export_options['format']
+        default=stem+'.'+fmt
+        name, _ = QFileDialog.getSaveFileName(self, "Export", default, fmt.upper()+" (*."+fmt+")",options=QFileDialog.DontConfirmOverwrite if fmt=='blend' else QFileDialog.Option(0))
+        if name:
+            if not Path(name).suffix:name+='.'+fmt
+            self.submit_fbx_exports([(project,self.active_result,source,Path(name))])
+
+    def validate_source_export(self, options):
+        scope=options['take_scope']
+        if scope=='all':
+            return self.checked_take_exports()
+        if scope=='selected':
+            return self.checked_take_exports(options['selected_takes'])
+        if options['format']=='blend_scene' or self.take_choices(paths={self.project}):
+            return self.checked_take_exports([self.project])
+        if self.current_export() is None:
+            from .take_selection import diagnose_take
+            edits=self.contact_tracks.get(base_result(self.active_result),{})
+            pending=self.active_result.startswith('corrected_') and (self.contact_saving or edits.get('unsaved'))
+            issue=diagnose_take(self.project,self.active_result,pending)
+            raise ValueError(issue.report('Current take'))
+        return None
 
     def submit_fbx_exports(self,files):
-        if self.busy or not files or self.current_export() is None:return
+        if self.busy or not files:return
+        if any(project==self.project for project,_,_,_ in files) and self.current_export() is None:
+            self.status.setText('Motion changed while choosing the destination. Apply Correction or run Prepare Preview first.')
+            return
         import uuid
         from .storage import atomic_json
         request=self.project/('.fbx-export-'+uuid.uuid4().hex+'.json')
         rows=[]
-        if getattr(self,'_source_export_options',{}).get('format')=='blend':
+        options=getattr(self,'_source_export_options',{})
+        fmt = options.get('format', 'fbx')
+        compatible = fmt == 'fbx' and options.get('fbx_compatibility', False)
+        combined = fmt == 'blend' and options.get('blend_layout') == 'combined'
+        if fmt == 'blend':
             from .blend_export_ui import targets
-            files=targets(files)
+            if combined:
+                target = targets(files[:1])[0][3]
+                files = [(project, kind, source, target) for project, kind, source, _ in files]
+            else:
+                files = targets(files)
         try:
             for project,kind,source,target in files:
                 row=dict(project=str(project),kind=kind,source=str(source),target=str(target))
                 row['rig_name']=self.export_person_name(project)
-                row['prepend_tpose']=getattr(self,'_source_export_options',{}).get('prepend_tpose',False)
+                row['prepend_tpose']=options.get('prepend_tpose',False)
+                row['export_face']=options.get('export_face',False)
+                row['face_format']=options.get('face_format','txt')
                 row['bvh_profile']=getattr(self,'_source_export_options',{}).get('bvh_profile','generic')
+                if compatible:row['fbx_compatibility']=True
+                if options.get('format') == 'fbx' and 'fbx_rest_pose' in options:
+                    row['fbx_rest_pose'] = options['fbx_rest_pose']
                 for key in ('place_at_origin','symmetric_rest'):
                     row[key]=getattr(self,'_source_export_options',{}).get(key,False) and getattr(self,'_source_export_options',{}).get('format','fbx') in ('fbx','bvh')
                 row['origin_group']=str(Path(project).resolve())
@@ -3888,13 +4030,17 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                 rows.append(row)
         except (OSError,ValueError,KeyError) as error:
             self.status.setText('Cannot export shared scene: '+str(error));return
-        atomic_json(request,rows)
-        self._motion_export_targets=[str(target) for _,_,_,target in files]
-        self._fbx_export_cleanup=(request,[target.with_name('.'+target.name+'.rgbmocap-'+request.stem+'.partial') for _,_,_,target in files])
-        stage='copy_bvh' if getattr(self,'_source_export_options',{}).get('format','fbx')=='bvh' else 'save_fbx'
-        if getattr(self,'_source_export_options',{}).get('format')=='blend':
+        destinations = list(dict.fromkeys(target for _, _, _, target in files))
+        atomic_json(request, dict(target=str(destinations[0]), takes=rows) if combined else rows)
+        self._motion_export_targets = [str(target) for target in destinations]
+        stage = 'copy_bvh' if fmt == 'bvh' else 'save_fbx'
+        if fmt == 'blend':
             from .blend_support import partial
-            stage='save_blend';self._fbx_export_cleanup=(request,[partial(target.parent,request) for _,_,_,target in files])
+            stage = 'save_blend'
+            staging = [partial(target.parent, request) for target in destinations]
+        else:
+            staging = [target.with_name('.'+target.name+'.rgbmocap-'+request.stem+'.partial') for target in destinations]
+        self._fbx_export_cleanup = (request, staging)
         self.start_jobs([(stage,['--project',str(self.project),'--output',str(request)])])
 
     def cleanup_fbx_export(self):

@@ -110,7 +110,7 @@ have not yet been verified; compatibility reports are welcome.
    cd Chamiseul_RGBMocap
    ```
 
-   Avoid protected folders such as Program Files. The commands below are for
+   Use a short, writable installation path such as C:\RGBMoCap. The commands below are for
    Command Prompt; in PowerShell, prefix each `.cmd` filename with `.\`.
 2. Run `install.cmd` with an internet connection. It downloads and verifies
    pinned Python environments, Blender 4.5.0, FFmpeg 7.1.1 and small upstream
@@ -156,6 +156,78 @@ from `install.cmd`/`update.cmd`. The [PromptHMR guide](models/PROMPTHMR.md) list
 the exact files, camera modes, native-build verification and repair steps.
 The Model Manager's **Runtime Setup...** button shows instructions; it does not
 run installation inside the app.
+
+### Optional SAM 3.1 person tracker
+
+After the base install, close RGB MoCap and run `Setup_SAM31.cmd`. This setup
+reuses ExMR's Python and CUDA runtime and requires native NVIDIA CUDA bfloat16
+support. Reopen the app, select ExMR, FlowHMR or GVHMR and choose **SAM 3.1**
+next to **Find person**. In **Model Manager**, use **Auto Download** on
+**SAM 3.1 Person Tracking (Optional)** or import the supported checkpoint.
+The base install and updater leave this optional setup for you to run.
+SAM 3.1 uses more VRAM than the Default YOLOv8x + OSNet tracker.
+**Resource Mode > Automatic** offloads tracking state to CPU RAM when VRAM
+is tight and can retry once after CUDA runs out of memory. **Low Memory**
+starts with CPU offloading, which can use more system RAM.
+See the [setup, usage and measured VRAM](models/SAM31.md#vram-use).
+
+### Face capture
+
+Turn on **Track Face** above **Processing Resources** to analyze faces when body
+reconstruction finishes. On a saved project with prepared video, turning on
+the checkbox starts face tracking directly. Face capture runs on CPU. The
+first run downloads the pinned MediaPipe runtime and model into the app cache.
+
+Projects save the **Track Face** checkbox. Reopening a project restores the
+setting and reuses any current face tracking data. **Save Project As** includes
+the facial data even when **Track Face** is off.
+
+For a People scene, check the people to track. MAMMA and PromptHMR use the
+saved actor motion and camera to locate each face in the primary camera.
+The landmarks follow the visible source mesh for each person, including
+SMPL-X, SMPL-H and SOMA.
+Use **Face Overlay** next to **Bone Overlay** in the 3D Viewport header to
+show or hide the landmarks. The overlay uses the latest valid expression
+through detection gaps. Before the first successful detection, the overlay
+is empty. Distant, heavily turned
+or obscured faces can lead to longer held intervals.
+
+Turn on **Export Face** in the export dialog and choose a face format. Each
+exported take with saved face tracking gets a face file beside the motion
+export. **RGB MoCap Face (.txt)** is the default. This UTF-8, tab-separated
+file includes these fields.
+
+| Field | Meaning |
+| --- | --- |
+| `export_frame`, `export_seconds` | Frame and time in the exported motion. The first frame index is zero. An inserted reference pose and combined-scene offsets are reflected here. |
+| `source_frame`, `source_seconds` | Zero-based frame in the prepared capture clip and time in the source video. |
+| `state`, `last_detected_source_frame` | `tracked`, `held`, `missing` or `reference`, plus the source frame that supplied the expression. |
+| ARKit channel names | Expression weights from 0 to 1. `tongueOut` is unsupported and uses zero where an expression is present. Missing values are blank. |
+
+Choose **Unreal Live Link Face (.csv)** to save an iOS ARKit-style recording.
+
+1. In Unreal Engine, enable **LiveLinkFaceImporter**, restart the editor, then
+   import the CSV in the Content Browser. Unreal creates a **Level Sequence**.
+2. Open that imported sequence in Sequencer and select the assembled MetaHuman
+   actor in the level. In Unreal Engine 5.7, enable **Use Live Link** and
+   **Use ARKit** in the actor's Details panel. Set **Live Link Subject** to the
+   name on the imported track. Older MetaHuman Blueprints may show
+   **Use ARKit Face** and **ARKit Face Subj**.
+3. Play or scrub the imported sequence to preview the expressions. If the face
+   stays still, expand the Live Link track and check for changing keys in a
+   curve such as **JawOpen**. Check playback in this sequence before adding it
+   to another sequence.
+
+See the [Epic import and playback steps](https://dev.epicgames.com/documentation/en-us/unreal-engine/recording-face-animation-on-ios-device-in-unreal-engine#using-csv-facial-recordings-in-unreal-engine).
+
+CSV timecodes follow the motion export timeline, including leading reference
+frames and combined-scene offsets. A lost detection holds the latest tracked
+expression when available. Frames with no available expression and reference
+frames use zeros. `tongueOut` and the nine standalone head/eye rotation fields
+are zero. The `eyeLook…` expression channels still carry tracked weights. Use
+the exported body animation for head motion.
+
+### Update the app
 
 To update, close RGB MoCap and run `update.cmd` in the repository folder. It
 refuses to overwrite tracked local edits, requires the `main` branch, pulls only
@@ -220,6 +292,9 @@ Rerun `install.cmd`; the component summary is `.setup/git-components.json`.
 Failed mandatory base installation or an unresolved update still blocks launch.
 Do not manually remove `.setup/git-sync.pending` to bypass that protection.
 
+MAMMA and PromptHMR package setup shows download progress and reuses
+verified downloads. Rerun setup to resume a partially downloaded package.
+
 Pinned support downloads retry transient network failures up to three attempts
 with bounded waiting and validated partial-download recovery. HTTPS certificate
 and final size/SHA-256 checks remain required. Permanent errors are reported
@@ -250,6 +325,10 @@ Shared model files and hardlinks are counted once.
 | GEM-X additional files, with CUDA sharing | 2.13 GiB | 7.11 GiB | 9.24 GiB |
 | **Six offline models** | **26.81 GiB** | **45.66 GiB** | **72.46 GiB** |
 | PEAR live preview, additional | Small support overlay; shared runtime reused | ~2.84 GiB | ~2.85 GiB |
+
+The optional [SAM 3.1 tracker](models/SAM31.md#setup) adds about **1.75 GB**
+(**1.63 GiB**) for its checkpoint and about **25 MiB** for the runtime overlay
+measured on the test PC. It reuses the ExMR runtime. The table excludes it.
 
 Adding PEAR to all six offline sets gives an estimated combined total of about
 **75.31 GiB (80.9 GB)**. Without GEM-X DLL sharing, add about **2.95 GiB**.
@@ -316,6 +395,15 @@ may be outside the installation folder.
 | `<install folder>\.setup\gemx-downloads\` | Verified GEM-X wheel and source download cache. Remove contents after setup finishes. Keep `runtime_gemx/`, `.setup/gemx-runtime.json` and the ExMR Python base. |
 | `<install folder>\.setup\pear-downloads\` | PEAR source/support and camera-alignment archives. Contents can be removed after installation/update finishes; repair may download them again. Keep `runtime_pear`, `.setup/pear-runtime.json` and `.setup/pear-alignment.json`. |
 | `<install folder>\temp\` | Local PEAR Torch/kernel temporary cache. Contents can be removed after closing the app and its workers; the next run can recreate them. |
+
+On file systems that support hardlinks, **Save Project As** preserves shared
+files within the new copy, including videos used by several people or takes.
+The new project remains independent of the original. On other file systems
+the save can require additional disk space for separate copies.
+
+If a project's character index cannot be read, the app preserves a copy under
+`characters/index.unreadable-*.json` before it saves a replacement. A failed
+backup stops the save. Keep the backup when recovering the character list.
 
 Repeated work mainly grows project data: each model has its own result folder.
 Inside `exmr`, `flowhmr` or `gvhmr`, different processing ranges can add `clips`
@@ -410,6 +498,9 @@ opening a project restores its saved model. **Prepare Preview**, below
 
 All six offline models support contact correction and portable Blender bundles.
 ExMR, FlowHMR and GVHMR offer **Find person** for explicit people selection.
+The tracker selector defaults to **Default**. Choose **SAM 3.1** to use a text
+prompt and optional markers on the displayed video frame. See the
+[SAM 3.1 setup and workflow](models/SAM31.md).
 MAMMA and PromptHMR track people during reconstruction. These five SMPL-based
 models offer a 52-bone overlay and FBX/BVH export. GEM-X uses the 77-bone SOMA
 rig for its overlay and FBX, BVH and Blender exports. See the
@@ -712,12 +803,12 @@ an estimate and can leave residual sliding or penetration.
 
 | Control | Function |
 | --- | --- |
-| **Find person** | For ExMR/FlowHMR/GVHMR, discover people for explicit selection. Without it, tracking selects one person and may switch identity during overlap. MAMMA/PromptHMR track people during reconstruction; this button is hidden. |
+| **Find person** | For ExMR, FlowHMR and GVHMR, choose **Default** or [SAM 3.1](models/SAM31.md#track-people) and run discovery. Check the People rows you want to reconstruct. Without discovery, automatic tracking selects one person and may switch identity during overlap. MAMMA and PromptHMR track people during reconstruction and hide this button. |
 | **People checkboxes / selected row** | Checked rows control visibility and ExMR/FlowHMR/GVHMR reconstruction targets. MAMMA/PromptHMR reconstruct their detected/requested people together. The selected row controls timeline and contact editing. |
 | **Character checkboxes / selected row** | Show or hide imported characters independently of source people. Select a character to export it; right-click it for Retarget, Export Character or Remove Character. |
 | **People → ?** | Open instructions for people selection, names, colors and takes. The list footer shows only current status or warnings. |
 | **Rename... / color square** | Right-click a row to rename it; click its square to change display color. The name is also used for FBX filenames and rig names. |
-| **Take selector** | Choose a visible section when a person leaves and reappears. Long unseen gaps are separate takes. |
+| **Take selector** | Switch between a person's saved frame ranges. Each row shows whether the chosen motion result is ready or needs work. Long tracking gaps can create separate takes, and reconstructing a different trim can save an overlapping range. |
 | **Overlays / Bone Overlay** | Show video observations / source export bones. Bone Overlay is drawn above source meshes and imported characters. Display only. |
 | **View direction / Frame All** | Choose a camera direction / fit visible people in the 3D view. Left drag orbits, middle/right drag pans, wheel zooms. |
 | **Floor Grid / Correction Floor** | Show the gray zero-height reference grid / orange correction floor preview. Neither applies correction. |
@@ -725,37 +816,80 @@ an estimate and can leave residual sliding or penetration.
 | **Lock** | Show active hand/foot contacts as translucent horizontal discs in timeline colors. Hand discs are at palm height, including raised supports. Display only. |
 | **Name** | Show list names above visible people and imported characters. Text stays upright and the same screen size as you move the camera. Rename a person from the list's right-click menu. |
 | **Timeline ruler / blue frame box** | Click or drag to seek. Track editing does not seek. Wheel zooms; middle drag or Shift+wheel pans. |
-| **Playback / frame number / speed** | Space plays/pauses; arrows step one frame, Shift+arrows one second. Enter a frame number to jump. Playback speed affects preview only. |
+| **Playback / frame number / speed** | Space plays/pauses; arrows step one frame, Shift+arrows one second. Enter a frame number to jump. Playback plays the video's audio when available. MAMMA uses the selected camera's audio. Playback speed affects preview only. |
 | **Timeline Frame All / Reset Trim** | Fit the full timeline / restore the full clip range. |
 
 ExMR/FlowHMR/GVHMR process checked people independently; MAMMA and PromptHMR
 reconstruct people together from their respective inputs. Results are shown in a shared scene.
 People share correction mode/floor; timings and pelvis offsets remain per person/take.
-Apply Correction updates all available takes, including hidden ones. Relative
-depth and contacts between people are estimates; collision avoidance is not provided.
+Apply Correction updates all available takes, including hidden ones. Checked
+takes with missing base motion are listed in Console and can be reconstructed separately.
+Relative depth and contacts between people are estimates; collision avoidance is not provided.
+
+## Stream bones to Blender
+
+1. Download the [RGB MoCap Bone Stream ZIP](../blender_addon/rgbmocap_bone_stream.zip?raw=1). In Blender 4.5 or later, open **Edit > Preferences > Add-ons**. If you previously installed the single-file build, remove that add-on before installing the ZIP.
+2. Open the menu in the upper-right corner of **Add-ons**, choose **Install from Disk**, select the ZIP, and enable **RGB MoCap Bone Stream**. Keep the ZIP intact for installation.
+3. In RGB MoCap, open a project with prepared offline motion. In the left **Stream** tab, choose **Blender** and check the people to send. The default target is **None**. The Stream checkboxes are separate from the People tab's visibility checkboxes.
+4. In Blender's 3D Viewport, press **N**, open **RGB MoCap > RGB MoCap Bone Stream**, and click **Connect**. The default port is **49168**. Play or scrub the RGB MoCap timeline to update the armatures. The stream is tied to the Blender scene and view layer used when connecting. Returning to them resumes the preview.
+
+If the port is already in use, choose another **Port** in RGB MoCap's **Stream** tab and enter the same number in Blender. Press Enter or leave the RGB MoCap port field to apply. **Reset** restores **49168** if available. Changing the active port requires reconnecting in Blender. If the new port is unavailable, an existing stream keeps its old port. The app returns to the default when relaunched.
+
+The add-on receives live bone poses, including root motion, with each person's rest skeleton. It updates the viewport without creating keyframes. The connection is local to this computer and supports offline people. PEAR, imported characters and meshes are outside this stream.
+
+**Disconnect** leaves the Blender objects in place. Connecting to the same person and rest skeleton reuses the existing armature and its edits. Unchecking a person in RGB MoCap hides that armature in Blender. Changing the target to **None** closes the stream.
+
+Use **Clean** in Object Mode to review and remove inactive stream rigs in the current scene. While connected, checked people keep their rigs through gaps in their takes. Clean also preserves rigs referenced by other Blender objects, shared rigs, and completed bakes. After disconnecting, all otherwise eligible inactive stream rigs can be removed. Blender asks before removing them and requires a new confirmation if the connection, scene, or view layer changes.
+
+Use **Bake** in Object Mode to save all recorded frames for the active streaming armature as a new Blender Action. If only one armature is streaming, Bake uses it automatically. The action includes root motion and uses the existing Blender scene FPS. Gaps between takes hold the previous pose until the next recorded frame. RGB MoCap can bake up to 36,000 timeline frames. After success, the app unchecks that person and the armature becomes a regular Blender object. Other people remain connected. Save the Blender file to keep the action. Use matching versions of RGB MoCap and the add-on for all controls.
 
 ## FBX and Blender
 
 **File → Export...** opens the options for the selected source model.
 For SMPL-based motion, choose **FBX (.fbx)**, **BVH (.bvh)** or
-**Blender project + video (.blend)**. **Add T-pose before motion** defaults off.
+**Blender project + video (.blend)**. The optional leading reference frame defaults off.
+For source FBX, choose **Rest pose → T-pose** (default) or **A-pose**.
+T-pose sets horizontal upper arms. A-pose sets the upper arms 54° below
+horizontal, based on the mean of the two upper-arm angles measured in
+[Epic's MetaHuman body reference rigs](https://github.com/EpicGames/MetaHuman-DNA-Calibration/tree/main/data/body).
+The rest pose selection works with Maya compatibility, per-person origin
+placement and, where offered, symmetrical rest. It preserves the recorded
+poses and length of each bone. The optional leading FBX frame uses the
+selected A- or T-pose.
 GEM-X offers [Native77 FBX, BVH and Blender exports](#gem-x-soma-blender-bundles).
+For FBX, enable **FBX Compatibility (Maya)** to use the included Blender
+runtime for the final export. The file retains the skeleton's rest pose and
+animation and can also be opened in Blender. This option defaults off.
 For SMPL BVH, choose **Generic / Blender** (default) or **3ds Max Biped** in the
 **BVH profile** list.
-The selected, applied result is exported. Each checked
-person/take gets a separate named file and rig; duplicate filenames get suffixes.
-People exports use the viewport's shared placement. Takes retain their own frame
-counts; align their start times when combining different source intervals.
+When there are multiple takes to choose from, **Export scope** offers three choices.
+
+- **Current take** exports the displayed result and is the default for one checked person.
+- **All takes for checked people** is the default when several people are checked.
+- **Selected takes → Choose takes…** lets you check individual ready takes across
+  people. The list shows each person's name, frame range and status. This selection
+  is independent of the People visibility checkboxes.
+
+The options window stays open if any requested take is unavailable. It lists each
+blocked take with its person, frame range, reason and suggested action. In
+**Choose takes…**, click a row to read its details. Choose **Apply Correction**
+when the saved correction is out of date, **Prepare Preview** when the export
+skeleton or preview needs rebuilding, or **Reconstruct 3D** when the take has no
+saved motion. You can also choose only the ready takes and export those first.
+MAMMA whole-scene export uses the requested takes and retains the original scene
+timeline and cameras.
+
+Separate-file exports preserve each take's frame count and shared placement.
+Duplicate filenames get suffixes. A combined Blender export keeps the relative
+start times of the exported takes.
 
 SMPL source-person exports use a 52-bone hierarchy with **Hips** as root and plain
 anatomical names by default. The Biped profile renames exported joints as described
 below. It retains
 actor lengths, SMPL-neutral curved limbs/feet, calibrated rest axes and straight
-open fingers. FBX stores rest transforms separately. With the T-pose option off,
-no extra frame is inserted. When enabled, one reference animation frame is placed
-before the original motion, at its initial root position; original frames shift
-by one and retain their poses, frame rate and intervals. The option does not
-replace the bind pose or edit project motion/contact timings.
+open fingers. The optional reference frame goes before the original motion and
+uses its initial root position. The original motion starts one frame later
+at the same frame rate.
 
 **Place at origin** and **Symmetrical rest pose** default off and apply only to
 source-skeleton FBX/BVH exports, including both BVH profiles. They are unavailable
@@ -765,8 +899,8 @@ for Blender project exports and do not change imported-character exports.
   Z=0, preserving its height, facing and subsequent travel. People are centered
   independently, so their relative scene placement is intentionally removed.
   Multiple exported takes of one person share the first exported take's constant
-  offset rather than resetting at every tracking gap. An optional leading T-pose
-  uses the same centered start.
+  offset rather than resetting at every tracking gap. An optional leading reference
+  frame uses the same centered start.
 - **Symmetrical rest pose:** average paired left/right segment lengths and mirror
   their reference directions, including shoulders, feet, hands, fingers and end
   tips. The central spine/neck/head chain is vertical. Motion timing and canonical
@@ -870,14 +1004,19 @@ destination. **PEAR live mode does not support preview export.**
 
 ### Portable Blender projects
 
-For SMPL-based motion, choose **Blender project + video (.blend)** in
-**File > Export...**, then choose an output filename. The exporter creates a
-**new subfolder** containing the
-`.blend`, `video.mp4`, `camera_report.json` and instructions. Existing folders are
-retained; a numbered folder is chosen when needed. For several checked people
-or takes, each gets its own portable folder. The selected applied motion and
-shared placement are preserved. Original inference, project files, contacts and
-camera receipts are not rewritten; stale results remain blocked.
+For SMPL-based motion, choose **Blender project + video (.blend)** under
+**File > Export...** and select a **Blender output** layout.
+
+- **Separate Blender files** creates a portable folder for each selected person
+  or take. Each folder contains a `.blend`, `video.mp4` and the export report.
+- **One Blender file** puts all selected people and takes in one `.blend`
+  scene, with their shared placement and relative start times. Each take is
+  visible during its recorded interval. Camera markers switch the background
+  video as playback moves between intervals. Identical clips share one
+  exported video file. Keep the video files beside the `.blend`.
+
+Each layout creates new folders and adds a number if a folder already exists.
+Apply pending corrections or prepare a stale preview before exporting.
 
 Open the `.blend` in Blender 4.5 or newer. **Numpad 0** enters the source-camera
 view and **Space** plays. The skeleton is editable; its object has no animated
@@ -894,14 +1033,16 @@ background corrections. Disabling tracking exports the first saved camera as a
 fixed camera. These choices affect only the exported camera, never body motion.
 Movement scale and reconstruction error can prevent exact video alignment; this
 is not measured camera calibration. The export report records the choices.
-An optional T-pose adds one animation frame and delays the video/camera timeline
-by one to keep the original motion and video paired.
+An optional T-pose adds one animation frame and delays the video and camera
+timeline to keep playback synchronized. In **One Blender file**, the option
+adds one shared lead-in frame for the takes that start first.
 
 ### GEM-X SOMA Blender bundles
 
 GEM-X FBX and BVH contain the shaped SOMA Native77 skeleton and its 30 fps
-animation. BVH uses the **Generic / Blender** profile. Both formats offer
-**Place at origin** and a reference frame from the native rest pose.
+animation. Both formats offer **Place at origin**. FBX offers a choice of A- or
+T-pose for the rest pose and optional leading frame. BVH uses the
+**Generic / Blender** profile and the native rest pose for its optional leading frame.
 
 The native bundle opens in the **SOMA Motion** scene with an editable 77-bone
 reference rig and a separate baked mesh. **Input Video** is a synchronized
@@ -915,10 +1056,10 @@ For character FBX or VMD, first retarget to a supported character. See the
 ### MAMMA whole-scene Blender projects
 
 When MAMMA is selected, the Blender format also shows **MAMMA whole scene: body
-meshes and all cameras**. Check it to export checked people and their visible
-takes together, all saved calibrated cameras, synchronized video panels, and a
-separate camera-view scene for each camera. The original common timeline is
-retained; the T-pose option is unavailable for this export.
+meshes and all cameras**. Enable it and use **Export scope** to choose which takes
+to include. The file includes all saved calibrated cameras, synchronized video
+panels, and a separate camera-view scene for each camera. It keeps the original
+common timeline. The leading reference frame option is unavailable for this export.
 
 Body surfaces are baked **PC2 mesh caches**, including the selected applied
 correction. Reference armatures are separate editable skeletons; they are **not

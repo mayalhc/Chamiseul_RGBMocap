@@ -90,6 +90,12 @@ https://github.com/user-attachments/assets/4c0b290b-4a65-4287-8d22-c63c96b3d080
 
 [Download original sample](docs/samples/multi-cam-mocap.mp4)
 
+### Streaming to Blender
+
+https://github.com/user-attachments/assets/cc0e79bb-ecce-4752-ae14-3b6cea30c810
+
+[Download original sample](docs/samples/streaming-to-blender.mp4)
+
 ## Install and run
 
 1. Install [Git for Windows](https://git-scm.com/download/win). Open **Command Prompt**
@@ -153,6 +159,19 @@ PEAR reuses the base shared runtime with a small support overlay prepared by
 `install.cmd` and `update.cmd`. No separate setup or compiler is required.
 Model files are prepared separately.
 
+For optional text-prompt and click-guided **Find person** tracking on Windows,
+run `Setup_SAM31.cmd` after the base setup. Then choose **SAM 3.1** next to
+**Find person** and use **Auto Download** on its 1.75 GB checkpoint row in
+**Model Manager**. SAM 3.1 uses more VRAM than **Default** tracking.
+**Resource Mode > Automatic** can offload tracking state and masks to system
+RAM when VRAM is tight and retry once after CUDA runs out of memory.
+See the [SAM 3.1 tracker guide](docs/models/SAM31.md#vram-use).
+
+**Track Face** adds CPU face tracking for saved video. The 3D viewport shows
+facial landmarks on SMPL-X, SMPL-H and SOMA surfaces. **Export Face** saves
+ARKit-style coefficients alongside the chosen motion as TXT or Unreal Live Link Face CSV.
+See [Face capture](docs/USER_GUIDE.md#face-capture).
+
 ### Install with an AI agent
 
 After cloning, open this repository folder in a local coding agent such as Codex.
@@ -194,9 +213,11 @@ do not put passwords or account tokens in the agent chat.
 - Reconstruct one or several people and preview the body mesh and animation bones.
 - Reduce sliding with foot/palm contact correction and editable contact timings.
 - Retarget motion to Mixamo FBX, VRM and PMX humanoid characters.
-- Export source animation as FBX or BVH (Generic/Blender or 3ds Max Biped), with optional leading T-pose, per-person origin placement and symmetrical rest pose; export characters as FBX with or without meshes,
+- Export source animation as FBX or BVH (Generic/Blender or 3ds Max Biped), with FBX A/T reference poses, an optional leading reference frame, per-person origin placement and symmetrical rest pose; export characters as FBX with or without meshes,
   or PMX character motion as VMD for MMD.
 - Export portable Blender projects with source animation, video and saved cameras; MAMMA can include animated body meshes and every camera.
+- Export the current take, all takes for checked people, or individual takes. The export dialog shows what to do for each unavailable take. [Export guide](docs/USER_GUIDE.md#fbx-and-blender)
+- Stream selected people's bones to Blender during playback or scrubbing, then bake their full recorded motion into Blender Actions. [Download the Blender add-on ZIP](blender_addon/rgbmocap_bone_stream.zip?raw=1) · [Installation and controls](docs/USER_GUIDE.md#stream-bones-to-blender)
 - Preview and correct GEM-X's native SOMA motion, retarget to humanoid characters, and export the Native77 skeleton as FBX or BVH. The Blender bundle includes the evaluated surface and input video.
 - Save side-by-side input video and the current 3D viewport as MP4 with **File > Export Preview...** (offline models).
 - Inspect source-video/bone alignment in Camera Preview and display saved cameras in 3D, with optional background rotation refinement for FlowHMR/ExMR.
@@ -210,6 +231,8 @@ do not put passwords or account tokens in the agent chat.
    **File > Open Video**. For MAMMA, select it before opening synchronized camera
    videos; thumbnails switch the preview and one timeline trim applies to all views.
 2. For ExMR, FlowHMR or GVHMR, optionally use **Find person** to select people.
+   Choose **Default** or use [SAM 3.1](docs/models/SAM31.md#track-people) for
+   text prompts and click selection.
    PromptHMR tracks people together during reconstruction.
    MAMMA detects people during reconstruction; keep **VGGT-Omega + GeoCalib (Automatic)** and
    enter an approximate **Reference Height (m)**, or import camera calibration.

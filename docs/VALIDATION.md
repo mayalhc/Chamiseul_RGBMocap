@@ -1,5 +1,148 @@
 # Source package validation
 
+## Unreal Live Link Face CSV export (2026-11-16)
+
+- Exported an FBX and a 199-frame facial CSV from the Windows app using a saved
+  face track. Verified that the CSV header matches an iPhone ARKit recording,
+  and that the default face TXT matches the previous writer byte for byte.
+- Imported the CSV into an empty Unreal Engine 5.7 content folder with the
+  LiveLinkFaceImporter plugin enabled. Verified the Level Sequence, all 61
+  channels, and changing facial keys. Also checked a short 24 fps clip, a
+  delayed start, and a single-frame CSV.
+- Verified face CSV files beside BVH and separate and combined Blender exports,
+  and checked the selected-take path used by MAMMA scene requests. The user
+  confirmed MetaHuman playback in Unreal Engine 5.7 with a separate
+  581-frame export.
+
+## Take selection and export diagnostics (2026-11-15)
+
+- In a saved Windows FlowHMR project with two people and three takes per person,
+  Export identified the four blocked takes by person, frame range, reason and
+  action. Saved contact edits and interrupted skeleton preparation had distinct
+  diagnostics. **Current take** showed only the selected take's status, and the
+  take chooser displayed details for unavailable rows.
+- Selected ready takes across both people, including a person unchecked in the
+  People list. Ran the FBX and BVH workers and opened the combined .blend in
+  Blender to verify that only the two requested takes were present. Also
+  checked the current-take and checked-people defaults.
+- Created a MAMMA whole-scene .blend with one requested take and verified that
+  it retained the saved cameras. Verified that the accompanying Face TXT plan
+  selected the same take.
+- Ran **Apply Correction** on a copy of the FlowHMR project and verified that the
+  stale older takes became exportable while takes without reconstruction remained
+  unavailable.
+
+## One-file Blender export (2026-11-15)
+
+- Exported two existing ExMR actors into one `.blend` and checked the
+  shared placement against a separate export in Blender 4.5. Both actors
+  shared one video file. Reopened the result after moving the bundle.
+- Checked a staggered two-take timeline with a gap. Armature visibility,
+  camera markers, video start frames and the optional shared lead-in followed
+  the intended intervals.
+- Exercised layout selection for ExMR, FlowHMR, MAMMA and GEM-X. The GEM-X
+  single-result route exported its Native77 rig, surface cache and video.
+
+## Windows stability and export checks (2026-11-15)
+
+- Exercised the checked-people export entry point and created separate
+  Blender 4.5 bundles with video for two existing ExMR takes. Tested existing
+  folder and case-insensitive conflicts plus FBX/BVH name allocation.
+- Ran the batch consent conditions with Y, N, interrupt and error return
+  codes. Verified that PromptHMR camera installation requires its own Y.
+- Exercised Qt QProcess callbacks with normal completion, malformed lines,
+  handler and cleanup exceptions, worker failure, nonzero exit and cancel.
+  Checked UTF-8 output and JSON reporting for a lone surrogate.
+- Tested valid, missing and unreadable character indexes with backup and
+  commit failures. Confirmed that originals and earlier backups survive.
+- Saved a test workspace on NTFS. Checked linked files, copy independence,
+  timestamps, disk limits, link fallback, cancellation, amended sources,
+  and manifest isolation.
+- Tested download interruption and resume, cache reuse, bad content and
+  redirect validation. Downloaded a small pinned wheel from its upstream
+  host and verified its hash. Tested uv reuse, version change, truncated
+  archive, wrong hash and retry in Windows PowerShell.
+- Exercised Windows path classification for an actual overlong name plus
+  synthetic missing paths, Unicode length and long-path registry states.
+  Full optional runtime installation and new model inference were outside
+  this pass.
+
+## Source FBX A-pose and T-pose (2026-11-15)
+
+- Measured upper-arm axes in Epic's MetaHuman DNA Calibration body bind
+  matrices. The female reference measures 52.62° below horizontal and the
+  male reference 54.66°. The exporter uses their rounded mean of 54°.
+- Exported committed 52-joint and Native77 results as direct and Maya-compatible
+  FBX. Checked A/T selection with and without the leading frame, origin
+  placement, and mirrored rest on the 52-joint rig. Blender 4.5.0 confirmed
+  both rest angles and leading frames, with a maximum difference of 0.000039
+  per world-matrix component across keyed and half frames compared with the
+  legacy export at matching times. Bone lengths agreed within 0.000001 m.
+- Maya 2027 imported four compatibility files with the animation take and
+  reproduced the selected 0° or 54° upper-arm angle in the leading frame.
+  Unreal Engine import and retargeting were outside these checks.
+- Checked source export dialog visibility, fixed layout, and emitted options
+  in ExMR, FlowHMR, MAMMA and GEM-X.
+
+## Blender bone streaming (2026-11-10)
+
+- Installed the same source ZIP through Blender's **Install from Disk**
+  operator in isolated Blender 4.5.0 and 5.2.3 environments. The application
+  exercised two-person streaming, selection changes, timeline gaps and
+  reconnecting to an edited rig.
+- Checked that switching to another scene or view layer paused application
+  without creating rigs there. Clean rejected stale confirmation after
+  disconnect and preserved referenced, shared and independently copied rigs.
+- Baked 91 frames across two takes from 30 fps source motion into a
+  24 fps Blender scene. Sampled bone matrices matched the incoming poses
+  within 0.00003 per component. The existing action and constraint were
+  retained, and the other rig stayed connected. An interrupted bake kept
+  the original action attached.
+- Verified basic live playback with add-on versions 1.0 and 1.1 connected
+  to the new sender. Full Bake and Clean workflows use the current ZIP.
+
+## SAM 3.1 person discovery (2026-11-10)
+
+- On the existing Windows development installation, checked launch and all
+  six base runtime profiles. Ran both SAM 3.1 and Default through the app's
+  Find person workflow on a 60 fps test clip prepared at 30 fps. The
+  `person` prompt and Default each returned two tracks covering all 24
+  working frames.
+- Reproduced a last-frame marker failure during source-to-working frame
+  conversion and at the end of reverse propagation. After the fix, a marker
+  on the final source frame returned one track covering all 24 working frames.
+  A marker that missed the detected people reported an error and kept the
+  previous People result.
+- Ran short-clip reconstruction, motion correction and export with ExMR,
+  FlowHMR and GVHMR. Also checked project copying and a portable Blender
+  bundle, opened native and compatibility FBX in Blender, and imported all
+  three compatibility FBX files in Maya 2027. Generated Generic/Blender and
+  3ds Max Biped BVH files.
+- Installed the SAM 3.1 overlay from its pinned sources and wheels in an
+  empty test folder linked to the existing base ExMR runtime. The installer
+  passed its CUDA check and the new overlay loaded the verified checkpoint
+  and tracked two people through all 24 working frames. A middle-frame
+  marker and a separate 286-frame text-only clip also passed.
+- Optional MAMMA, PromptHMR, GEM-X and PEAR checks covered runtime readiness
+  and worker routing. This pass did not measure tracking accuracy across
+  footage, test a clean Windows installation, or run those models end to end.
+
+## SAM 3.1 CPU offloading (2026-11-15)
+
+- On Windows with an RTX 5090 and the installed ExMR/SAM 3.1 runtime, ran
+  the 443-frame two-person marker clip with Low Memory. All saved box
+  coordinates matched the corresponding fast run. Peak PyTorch allocation
+  fell from 17.46 GiB to 11.75 GiB, with peak reservation falling from
+  18.48 GiB to 12.65 GiB.
+- At a simulated 12.9 GiB PyTorch cap, Automatic selected offloading for
+  the 150-frame marker clip and tracked both people. Forcing the fast path
+  in the test triggered a real CUDA OOM. The supervisor used a fresh worker
+  once, and its offloaded track matched the fast reference for all frames.
+- At a simulated 10.4 GiB cap, offloading could still run out of memory on
+  the 443-frame clip. The worker preserved the previous People result and
+  discarded its partial generation. The allocator caps were tested on the
+  RTX 5090.
+
 ## Resource Safety control (2026-11-03)
 
 The default-on checkbox below Resource Mode controls the existing desktop
