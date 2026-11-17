@@ -60,12 +60,17 @@ def build_blueprint(name=NAME, mesh_path=None):
 
 
 def free_person(taken):
-    """The first Person slot no actor in the level answers to yet."""
+    """A subject the app really streams (Person 1..SUBJECTS) for the next actor.
+
+    The plugin serves one source per subject, so an actor named past the last
+    one would wait for a stream that never comes. Slots nobody stands on come
+    first; with every slot taken the actor shares Person 1, which is allowed.
+    """
     labels = {a.get_actor_label() for a in unreal.EditorLevelLibrary.get_all_level_actors()}
-    person = 1
-    while "RGBMoCapLive_Person%d" % person in labels or person in taken:
-        person += 1
-    return person
+    for person in range(1, SUBJECTS + 1):
+        if "RGBMoCapLive_Person%d" % person not in labels and person not in taken:
+            return person
+    return 1
 
 
 def place_own(blueprint, mesh_path, taken):
@@ -97,14 +102,17 @@ def adopt_actor(actor, taken):
     """Make an actor the level already holds follow the stream."""
     anim_class = getattr(unreal, "RGBMocapLiveInstance", None) or unreal.MotionForgeLiveLinkInstance
     label = actor.get_actor_label()
+    person = 0
     if label.startswith("RGBMoCapLive_Person"):
-        person = int(label.rsplit("Person", 1)[1] or 0) or free_person(taken)
-    else:
-        person = free_person(taken)
+        tail = label.rsplit("Person", 1)[1]
+        person = int(tail) if tail.isdigit() and 1 <= int(tail) <= SUBJECTS else 0
+    person = person or free_person(taken)
     taken.add(person)
     actor.set_actor_label("RGBMoCapLive_Person%d" % person)
     for component in actor.get_components_by_class(unreal.SkeletalMeshComponent):
         component.set_editor_property("animation_mode", unreal.AnimationMode.ANIMATION_BLUEPRINT)
+        # Setting the class again starts a fresh instance, which reads the new name.
+        component.set_editor_property("anim_class", None)
         component.set_editor_property("anim_class", anim_class)
         try:
             component.set_editor_property("update_animation_in_editor", True)
