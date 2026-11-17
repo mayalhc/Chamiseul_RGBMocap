@@ -138,6 +138,14 @@ class BodyStream:
         matrices[:, :3, 3] = offset
         return yawed_frames(matrices)
 
+    def standing_height(self):
+        """The hips' usual height over the take (metres), the floor reference for live height."""
+        cached = getattr(self, '_standing', None)
+        if cached is None:
+            root = self.names.index('Hips') if 'Hips' in self.names else 0
+            cached = self._standing = float(np.median(np.asarray(self.frames[:, root, 1, 3])))
+        return cached
+
     def rest_file(self):
         """Write (once) the bind pose the bridge builds its rig from.
 

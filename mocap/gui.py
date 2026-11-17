@@ -2438,7 +2438,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                     link.publish(subject, body.names, body.rest, body.parents,
                                  body.frames[frame], frame=frame,
                                  rest_rotations=getattr(body, 'rest_frames', None),
-                                 display_frames=getattr(body, 'display', None))
+                                 display_frames=getattr(body, 'display', None),
+                                 stand_y=body.standing_height())
                 return
             found = self.live_body_frame(index)
             if found is None:
@@ -2457,7 +2458,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             target.publish(body.names, body.rest, body.parents, body.frames[body_index],
                            frame=int(body_index),
                            rest_rotations=getattr(body, 'rest_frames', None),
-                           display_frames=getattr(body, 'display', None))
+                           display_frames=getattr(body, 'display', None),
+                           stand_y=body.standing_height())
         except Exception as error:          # noqa: BLE001 - reported, not raised
             self.log.append('Unreal live: ' + str(error))
 

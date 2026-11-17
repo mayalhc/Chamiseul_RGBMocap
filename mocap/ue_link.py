@@ -219,7 +219,7 @@ class UnrealLink:
 
     # -- one frame --------------------------------------------------------
     def publish(self, names, rest, parents, matrices, frame=0, fps=30.0,
-                rest_rotations=None, display_frames=None):
+                rest_rotations=None, display_frames=None, stand_y=None):
         """`matrices` are the take's 52 world matrices (rest^-1 @ pose gives the delta)."""
         if not self.active:
             return 0
@@ -271,14 +271,29 @@ class UnrealLink:
             # 100, so its bone translations are metres: sending centimetres
             # multiplied every step by 100 and threw the character clear of
             # the level. Travel goes out in the same unit the skeleton uses.
-            shift = TO_UNREAL @ (now - self._origin)
+            # Sideways travel is measured from the first frame sent, but height is
+            # measured from the take's own standing rest: a live link started
+            # while the person was crouched or mid-jump would otherwise treat that
+            # moment as the floor and hold every later frame off the ground.
+            travel = now - self._origin
+            travel[1] = now[1] - (float(stand_y) if stand_y is not None
+                                  else float(np.asarray(_rest_positions, dtype=np.float64)[mapped[0]][1]))
+            shift = TO_UNREAL @ travel
             # Already in Unreal's axes: the stream announces local-delta, so the
             # plugin adds these to the root as they arrive.
             translation = [round(float(shift[0]), 3), round(float(shift[1]), 3),
                            round(float(shift[2]), 3)]
+        # How high the take's own feet and toes are above its floor (centimetres).
+        # The receiver lowers or raises the character until its matching joints
+        # stand at these heights, so legs of another length neither float nor sink.
+        ground = {}
+        for index in mapped:
+            joint = unreal_name(names[index])
+            if joint in ('foot_l', 'foot_r', 'ball_l', 'ball_r'):
+                ground[joint] = round(float(frames[index][1, 3]) * CM, 3)
         line = json.dumps({'type': 'frame', 'index': int(frame), 'fps': float(fps),
                            'time': round(time.monotonic() - self._started, 4),
-                           'translation': translation,
+                           'translation': translation, 'ground': ground,
                            'pose': [[round(v, 6) for v in row] for row in pose]}) + '\n'
         self.frames += 1
         with self._lock:
@@ -417,12 +432,13 @@ class MultiLink:
         return True, 'Unreal: ' + ', '.join(started)
 
     def publish(self, subject, names, rest, parents, matrices, frame=0, fps=30.0,
-                rest_rotations=None, display_frames=None):
+                rest_rotations=None, display_frames=None, stand_y=None):
         link = self.links.get(subject)
         if link is None:
             return 0
         return link.publish(names, rest, parents, matrices, frame=frame, fps=fps,
-                            rest_rotations=rest_rotations, display_frames=display_frames)
+                            rest_rotations=rest_rotations, display_frames=display_frames,
+                            stand_y=stand_y)
 
     def clients(self):
         return sum(link.clients() for link in self.links.values())
