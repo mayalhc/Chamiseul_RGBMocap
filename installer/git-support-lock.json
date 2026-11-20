@@ -2,5 +2,5 @@
   "version": 2,
   "blender": {"url":"https://download.blender.org/release/Blender4.5/blender-4.5.0-windows-x64.zip", "bytes":399946398, "sha256":"2ee75e9466d293a784fdf020f60fe1309c1e0610ecf73c64f1fc09b01e5eec56", "archive_root":"blender-4.5.0-windows-x64"},
   "ffmpeg": {"url":"https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build.zip", "bytes":177650503, "sha256":"d760e1b3574402ed18b4865851f87d87e73965a982e6453212df8621fed1c508", "archive_root":"ffmpeg-7.1.1-full_build"},
-  "correction": {"path":"prebuilt/motion-correction/_motion_correction.cp310-win_amd64.pyd", "bytes":413696, "sha256":"46fea913e302fafa2281842e8b081ba34cfcbc572e2d2f36ac107bc89ed22638"}
+  "correction": {"path":"prebuilt/motion-correction/_motion_correction.cp310-win_amd64.pyd", "bytes":387584, "sha256":"6c20c0908751f78d1e820feb49802f4c3daf1deb08e69bb4a00a4547c7e17324"}
 }

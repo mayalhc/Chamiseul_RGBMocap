@@ -16,7 +16,7 @@ tracked files and an installed `runtime*`, `models` and `projects` tree.
 | `tools/` | bootstrap, installer, preflight, source check | small |
 | `installer/` | `runtime-lock.json`, `git-support-lock.json`, `external-assets.json`, pure-Python wheel sources, licenses | 2.6 MiB |
 | `third_party/` | pinned upstream model source (2,104 of the tracked files) | ~25 MiB |
-| `prebuilt/motion-correction/_motion_correction.cp310-win_amd64.pyd` | verified CPU correction module, hash pinned in `git-support-lock.json` | 404 KiB |
+| `prebuilt/motion-correction/_motion_correction.cp310-win_amd64.pyd` | verified CPU correction module, hash pinned in `git-support-lock.json` | 379 KiB |
 | `native_compat/`, `assets/`, `docs/` | shims, fonts/icon, documentation, two sample videos | ~36 MiB |
 | `requirements/`, `requirements-*.txt` | runtime pins and worker cache fingerprints | small |
 

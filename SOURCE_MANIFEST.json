@@ -2441,8 +2441,8 @@
     },
     {
       "path": "prebuilt/motion-correction/_motion_correction.cp310-win_amd64.pyd",
-      "bytes": 413696,
-      "sha256": "46fea913e302fafa2281842e8b081ba34cfcbc572e2d2f36ac107bc89ed22638"
+      "bytes": 387584,
+      "sha256": "6c20c0908751f78d1e820feb49802f4c3daf1deb08e69bb4a00a4547c7e17324"
     },
     {
       "path": "prompthmr_worker_boot.py",
