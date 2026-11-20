@@ -138,6 +138,34 @@ class BodyStream:
         matrices[:, :3, 3] = offset
         return yawed_frames(matrices)
 
+    def contacts(self, index):
+        """Which feet the take has on the ground at this frame.
+
+        A foot is planted when its ankle and toe are low and barely move over the
+        frames around this one. A receiver keeps such a foot where it first
+        touched, so it does not slide as the hips travel.
+        """
+        names = list(self.names)
+        last = int(self.count) - 1
+        out = {}
+        for side in ('Left', 'Right'):
+            try:
+                foot, toe = names.index(side + 'Foot'), names.index(side + 'ToeBase')
+            except ValueError:
+                continue
+            window = [max(0, min(last, int(index) + step)) for step in (-2, -1, 0, 1, 2)]
+            planted = True
+            for joint, high in ((foot, 0.16), (toe, 0.10)):
+                track = np.array([np.asarray(self.frames[i][joint][:3, 3], dtype=np.float64)
+                                  for i in window])
+                if track[:, 1].min() > high or track[:, 1].max() > high * 1.6:
+                    planted = False
+                step = np.linalg.norm(np.diff(track[:, [0, 2]], axis=0), axis=1) * 100.0
+                if step.max() > 0.9:
+                    planted = False
+            out[side + 'Foot'] = bool(planted)
+        return out
+
     def standing_height(self):
         """The hips' usual height over the take (metres), the floor reference for live height."""
         cached = getattr(self, '_standing', None)

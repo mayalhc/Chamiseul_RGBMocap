@@ -2473,7 +2473,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                                  body.frames[frame], frame=frame,
                                  rest_rotations=getattr(body, 'rest_frames', None),
                                  display_frames=getattr(body, 'display', None),
-                                 stand_y=body.standing_height())
+                                 stand_y=body.standing_height(), contacts=body.contacts(frame))
                 return
             found = self.live_body_frame(index)
             if found is None:
@@ -2493,7 +2493,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                            frame=int(body_index),
                            rest_rotations=getattr(body, 'rest_frames', None),
                            display_frames=getattr(body, 'display', None),
-                           stand_y=body.standing_height())
+                           stand_y=body.standing_height(), contacts=body.contacts(body_index))
         except Exception as error:          # noqa: BLE001 - reported, not raised
             self.log.append('Unreal live: ' + str(error))
 
@@ -2546,6 +2546,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         # something to send.
         self.publish_ue_frame(index)
         self.publish_cascadeur_frame(index)
+        self.publish_max_frame(index)
         link = getattr(self, 'live_link', None)
         if link is None or not link.active:
             return
@@ -2783,6 +2784,182 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             link.publish(body_index)
         except Exception as error:              # noqa: BLE001 - logged, not raised
             self.log.append('Cascadeur live: ' + str(error))
+
+    # -- 3ds Max ---------------------------------------------------------
+    def max_poll_timer(self):
+        """The timer that picks up a connection attempt leaving its answer."""
+        timer = getattr(self, 'max_poll', None)
+        if timer is None:
+            self.max_poll = timer = QTimer(self)
+            timer.setInterval(120)
+            timer.timeout.connect(self.poll_max_link)
+        return timer
+
+    def send_base_character_to_max(self):
+        """File > Send Base Character to 3ds Max: import and check the T-pose."""
+        from .max_link import MaxLink, base_character_path
+        from .paths import ROOT
+        fbx = base_character_path(ROOT)
+        if not fbx.is_file():
+            message = 'the base character is missing at %s' % fbx
+            self.log.append('3ds Max: ' + message)
+            self.status.setText('3ds Max: ' + message)
+            return
+        self.status.setText('3ds Max: sending the base character...')
+        rows = self.ue_scene_rows()
+        people = len(rows) if rows else 1
+
+        def work():
+            try:
+                ok, message, checks = MaxLink().send_base(fbx, count=people)
+            except Exception as error:          # noqa: BLE001 - shown, not raised
+                ok, message, checks = False, str(error), {}
+            if checks:
+                message += ' (%s)' % ', '.join('%s=%s' % item for item in checks.items())
+            self.log.append('3ds Max: ' + message)
+            self.status.setText(('3ds Max: ' if ok else '3ds Max: base failed: ') + message)
+
+        threading.Thread(target=work, name='rgbmocap-max-base', daemon=True).start()
+
+    def toggle_max_link(self, enabled):
+        """File > Live Link to 3ds Max: stream the displayed take into Max."""
+        from .max_link import MaxLink
+        link = getattr(self, 'max_link', None)
+        if not enabled:
+            self.max_poll_timer().stop()
+            if link is not None:
+                link.stop()
+            self.stop_max_people()
+            self.status.setText('3ds Max live link stopped.')
+            return
+        if link is None:
+            self.max_link = link = MaxLink()
+        self.status.setText('Connecting to 3ds Max...')
+        self.max_outcome = None
+
+        def work():
+            try:
+                self.max_outcome = link.connect()
+            except Exception as error:          # noqa: BLE001 - shown, not raised
+                self.max_outcome = (False, str(error))
+
+        threading.Thread(target=work, name='rgbmocap-max-connect', daemon=True).start()
+        self.max_poll_timer().start()
+
+    def poll_max_link(self):
+        outcome = getattr(self, 'max_outcome', None)
+        if outcome is None:
+            return
+        action = getattr(self, 'max_link_action', None)
+        if action is not None and not action.isChecked():
+            self.max_outcome = None
+            self.max_poll_timer().stop()
+            return
+        self.max_outcome = None
+        self.max_poll_timer().stop()
+        ok, message = outcome
+        self.log.append('3ds Max: ' + message)
+        if not ok:
+            self.max_link_failed(message)
+            return
+        frame = getattr(self.motion_view, 'index', 0) or 0
+        rows = self.ue_scene_rows()
+        if rows is not None and len(rows) >= 2:
+            self.start_max_people(rows)
+            return
+        found = self.live_body_frame(frame)
+        if found is None:
+            self.status.setText('3ds Max linked. Play a reconstructed take to stream it.')
+            return
+        body, index, _transform = found
+        ok, message = self.max_link.start(body, index)
+        self.log.append('3ds Max: ' + message)
+        if not ok:
+            self.max_link_failed(message)
+            return
+        self.status.setText(message)
+
+    def max_link_failed(self, message):
+        self.status.setText('3ds Max: ' + message)
+        action = getattr(self, 'max_link_action', None)
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(False)
+            action.blockSignals(False)
+
+    def stop_max_people(self):
+        for link in list(getattr(self, 'max_people', {}).values()):
+            link.stop()
+        self.max_people = {}
+
+    def start_max_people(self, rows):
+        """Each person on screen drives a character of its own in 3ds Max.
+
+        The same as the Blender and Unreal links: person N of the scene is
+        bound separately, and the receiver gives it its own character.
+        """
+        from .max_link import MaxLink
+        self.stop_max_people()
+        self.max_people = {}
+        started, failed = 0, []
+        for number, (_subject, body, frame, _transform) in enumerate(rows, 1):
+            link = MaxLink()
+            link.person, link.persons = number, len(rows)
+            ok, message = link.start(body, frame, publish_first=False)
+            if ok:
+                self.max_people[number] = link
+                started += 1
+            else:
+                failed.append('person %d: %s' % (number, message))
+        for line in failed:
+            self.log.append('3ds Max: ' + line)
+        self.status.setText('3ds Max: %d of %d people linked%s' % (
+            started, len(rows), '. ' + failed[0] if failed else '.'))
+        if not started:
+            self.max_link_failed(failed[0] if failed else 'no character to drive')
+
+    def publish_max_people(self, rows):
+        for number, (_subject, body, frame, _transform) in enumerate(rows, 1):
+            link = self.max_people.get(number)
+            if link is None:
+                continue
+            link.transform = _transform
+            if body is not link.body:
+                ok, message = link.start(body, frame, publish_first=False)
+                if not ok:
+                    self.log.append('3ds Max: person %d: %s' % (number, message))
+                    continue
+            link.publish(frame)
+
+    def publish_max_frame(self, index):
+        link = getattr(self, 'max_link', None)
+        if link is None or not link.active:
+            people = getattr(self, 'max_people', None)
+            if not people:
+                return
+        try:
+            rows = self.ue_scene_rows()
+            if rows is not None and len(rows) >= 2 and getattr(self, 'max_people', None):
+                self.publish_max_people(rows)
+                return
+            if link is None or not link.active:
+                return
+            found = self.live_body_frame(index)
+            if found is None:
+                return
+            body, body_index, _transform = found
+            link.transform = _transform
+            if body is not link.body:
+                # A different take or person came on screen: rebind rather than
+                # streaming one take's frames into another's bind.
+                ok, message = link.start(body, body_index)
+                self.log.append('3ds Max: ' + message)
+                if not ok:
+                    self.max_link_failed(message)
+                    return
+            link.publish(body_index)
+        except Exception as error:              # noqa: BLE001 - logged, not raised
+            self.log.append('3ds Max live: ' + str(error))
 
     def reset_play_clock(self, *_):
         self.play_anchor = self.slider.value()
@@ -4117,6 +4294,9 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                 self.cascadeur_link.disconnect(wait=1.0)
             except Exception:
                 pass
+        if getattr(self, 'max_link', None) is not None:
+            self.max_link.stop()
+        self.stop_max_people()
         self.character_loader.close()
         if getattr(self, 'camera_check', None) is not None:
             self.camera_check.close()

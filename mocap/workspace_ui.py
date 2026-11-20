@@ -781,6 +781,13 @@ def build_workspace(w):
     w.cascadeur_link_action.setCheckable(True)
     w.cascadeur_link_action.setToolTip(tooltip_text('Drive the character in Cascadeur from this window over localhost, with no file to export and re-import.\nStart Cascadeur, import the character you exported from here, then start this. Play, pause or scrub here and the Cascadeur take is written as you watch.\nLeave Cascadeur closed and nothing happens; the link is only created while Cascadeur is answering.'))
     w.cascadeur_link_action.toggled.connect(w.toggle_cascadeur_link)
+    w.max_base_action = file_menu.addAction('Send Base Character to 3ds Max')
+    w.max_base_action.setToolTip(tooltip_text('Import the prepared T-pose base body into 3ds Max and check it stands correctly.\nInstall the RGB MoCap 3ds Max plug-in once (it is distributed separately); Max then listens as soon as it opens.\nRun it once before Live Link to 3ds Max; every pose is composed onto that rest.'))
+    w.max_base_action.triggered.connect(w.send_base_character_to_max)
+    w.max_link_action = file_menu.addAction('Live Link to 3ds Max')
+    w.max_link_action.setCheckable(True)
+    w.max_link_action.setToolTip(tooltip_text('Stream the displayed take into an open 3ds Max scene on localhost.\nInstall the RGB MoCap 3ds Max plug-in once (distributed separately), send the base character from here, then start this.\nPlay, pause or scrub here and the Max bones follow; no FBX to export and re-import.'))
+    w.max_link_action.toggled.connect(w.toggle_max_link)
     file_menu.addAction("Open Project Folder", w.open_folder)
     file_menu.addSeparator()
     file_menu.addAction("Exit", w.close)
@@ -802,6 +809,8 @@ def build_workspace(w):
         'Send Base Character to Unreal': 'Import the T-pose base body into the open Unreal project.',
         'Live Link to Unreal (UE5)': 'Stream the displayed take into Unreal Live Link on localhost.',
         'Live Link to Cascadeur': 'Write the displayed pose into an open Cascadeur scene on localhost.',
+        'Send Base Character to 3ds Max': 'Import the T-pose base body into 3ds Max and check it.',
+        'Live Link to 3ds Max': 'Stream the displayed pose into an open 3ds Max scene on localhost.',
         'Exit': 'Close RGB MoCap.',
         'Check System': 'Check hardware and required software. Results appear in the Console.',
         'Controls': 'Show keyboard shortcuts and workspace controls.',

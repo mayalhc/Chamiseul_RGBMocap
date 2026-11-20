@@ -219,7 +219,7 @@ class UnrealLink:
 
     # -- one frame --------------------------------------------------------
     def publish(self, names, rest, parents, matrices, frame=0, fps=30.0,
-                rest_rotations=None, display_frames=None, stand_y=None):
+                rest_rotations=None, display_frames=None, stand_y=None, contacts=None):
         """`matrices` are the take's 52 world matrices (rest^-1 @ pose gives the delta)."""
         if not self.active:
             return 0
@@ -291,9 +291,12 @@ class UnrealLink:
             joint = unreal_name(names[index])
             if joint in ('foot_l', 'foot_r', 'ball_l', 'ball_r'):
                 ground[joint] = round(float(frames[index][1, 3]) * CM, 3)
+        # Which feet the take has planted, by Unreal's bone names: the receiver keeps
+        # a planted foot where it first touched instead of letting it slide.
+        planted = {unreal_name(name): bool(value) for name, value in (contacts or {}).items()}
         line = json.dumps({'type': 'frame', 'index': int(frame), 'fps': float(fps),
                            'time': round(time.monotonic() - self._started, 4),
-                           'translation': translation, 'ground': ground,
+                           'translation': translation, 'ground': ground, 'contacts': planted,
                            'pose': [[round(v, 6) for v in row] for row in pose]}) + '\n'
         self.frames += 1
         with self._lock:
@@ -432,13 +435,13 @@ class MultiLink:
         return True, 'Unreal: ' + ', '.join(started)
 
     def publish(self, subject, names, rest, parents, matrices, frame=0, fps=30.0,
-                rest_rotations=None, display_frames=None, stand_y=None):
+                rest_rotations=None, display_frames=None, stand_y=None, contacts=None):
         link = self.links.get(subject)
         if link is None:
             return 0
         return link.publish(names, rest, parents, matrices, frame=frame, fps=fps,
                             rest_rotations=rest_rotations, display_frames=display_frames,
-                            stand_y=stand_y)
+                            stand_y=stand_y, contacts=contacts)
 
     def clients(self):
         return sum(link.clients() for link in self.links.values())
