@@ -102,16 +102,21 @@ Blender retains its GPL license and bundled notices; see [Third-party notices](.
 not a minimum specification. Other GPUs, drivers and clean Windows installations
 have not yet been verified; compatibility reports are welcome.
 
+On Windows 11 with Smart App Control set to **On**, see
+[Smart App Control troubleshooting](#smart-app-control-on-windows-11) before running setup.
+
 1. Install [Git for Windows](https://git-scm.com/download/win). Open **Command
-   Prompt** in a writable folder, then run:
+   Prompt** and clone into a short, writable installation path such as
+   `C:\RGBMoCap`. Adjust the path if you need a different folder.
 
    ```cmd
-   git clone https://github.com/mayalhc/Chamiseul_RGBMocap.git
-   cd Chamiseul_RGBMocap
+   git clone https://github.com/mayalhc/Chamiseul_RGBMocap.git C:\RGBMoCap
+   cd /d C:\RGBMoCap
    ```
 
-   Use a short, writable installation path such as C:\RGBMoCap. The commands below are for
-   Command Prompt; in PowerShell, prefix each `.cmd` filename with `.\`.
+   The commands below are for Command Prompt. In PowerShell, prefix each `.cmd` filename
+   with `.\`. See [Windows path length troubleshooting](#windows-path-length-during-installation)
+   if setup fails on a deeply nested path.
 2. Run `install.cmd` with an internet connection. It downloads and verifies
    pinned Python environments, Blender 4.5.0, FFmpeg 7.1.1 and small upstream
    support files, and installs the included prebuilt motion-correction module.
@@ -187,15 +192,24 @@ saved actor motion and camera to locate each face in the primary camera.
 The landmarks follow the visible source mesh for each person, including
 SMPL-X, SMPL-H and SOMA.
 Use **Face Overlay** next to **Bone Overlay** in the 3D Viewport header to
-show or hide the landmarks. The overlay uses the latest valid expression
-through detection gaps. Before the first successful detection, the overlay
+show or hide the landmarks. The overlay displays One Euro-smoothed landmarks and holds the latest valid
+smoothed expression through detection gaps. Unreal face streaming automatically
+uses smoothed ARKit coefficients from the same prepared playback cache. Smoothing
+is calculated once in capture-time order on a background thread, so playback
+speed, pausing, reverse seeks and loops do not change a frame's result. Blink/gaze
+and lip landmarks respond faster than the quieter facial regions.
+Original capture data remain unchanged; existing projects need no new capture. Before the first successful detection, the overlay
 is empty. Distant, heavily turned
 or obscured faces can lead to longer held intervals.
 
 Turn on **Export Face** in the export dialog and choose a face format. Each
 exported take with saved face tracking gets a face file beside the motion
 export. **RGB MoCap Face (.txt)** is the default. This UTF-8, tab-separated
-file includes these fields.
+file includes these fields. **Smooth Face** is on by default for both face
+formats. It applies channel-specific One Euro filtering to saved expression
+values. Blink, gaze and speech channels respond faster than brow and cheek
+channels. Uncheck it to export unsmoothed values; saved neutral-face calibration still applies. You can compare both
+outputs from the same capture. The setting affects the exported expressions.
 
 | Field | Meaning |
 | --- | --- |
@@ -226,6 +240,34 @@ expression when available. Frames with no available expression and reference
 frames use zeros. `tongueOut` and the nine standalone head/eye rotation fields
 are zero. The `eyeLook…` expression channels still carry tracked weights. Use
 the exported body animation for head motion.
+
+### Face streaming to MetaHuman
+
+Saved Track Face data can accompany each checked Unreal Live Link person. Enable **Face** on that source row in the separately installed RGB MoCap MetaHuman Connect 0.4.0 plugin. No capture is started by streaming. Missing detections hold the last expression; missing face data do not block body motion. See [face streaming setup and limitations](UNREAL_LIVE_LINK.md#optional-metahuman-face-streaming).
+
+
+### Set a neutral face
+
+Select a person in the **People** list, move the timeline to a frame where that
+person has open eyes and a relaxed mouth, then click **Set Neutral** beside
+**Track Face**. This corrects a persistent detected blink/open-mouth bias for
+that person. A fresh successful detection at the selected frame is required;
+a held expression or missing face cannot be used. No face inference is started.
+
+The selected frame becomes zero expression in preview, Unreal face streaming
+and both face export formats. Other frames use the change from that baseline.
+Landmark offsets are also recentered on the template's neutral face. The setting
+applies across the person's takes in that capture; the note displays its capture
+frame, which can differ from a trimmed take's frame number. Other people retain
+their own calibration. **Reset** clears only the selected person's neutral.
+
+Calibration is saved immediately in the project as face_neutral.json and is
+included in Save Project As. Original face_capture.npz data remain untouched;
+reopening the project restores calibration. Changing the source/tracking identity
+invalidates an old baseline. Existing smoothing remains enabled for playback,
+and the selected neutral frame stays exactly neutral after filtering. Smooth
+Face in Export controls smoothing independently; calibration applies with it
+on or off. Very poor/occluded detections still need a better capture or frame.
 
 ### Update the app
 
@@ -262,6 +304,51 @@ Read actual Git/download/installation errors before retrying; an incomplete
 installation remains incomplete until verification succeeds. Force-closing the
 console or deleting the running launcher is not a supported update path.
 
+### Smart App Control on Windows 11
+
+Smart App Control may block the unsigned private `python.exe` that
+`install.cmd` starts from `.setup/python/`. It can also block the private
+Python used by `RGBMoCap.cmd` after installation. Setup uses an app-local
+runtime even when Python is already installed on the system. An installation
+and launch path with Smart App Control set to **On** has yet to be verified.
+See [reported issue #68](https://github.com/toyxyz/toyxyz_RGBMocap/issues/68)
+and [Microsoft's Smart App Control overview](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview).
+
+If Windows reports a block, open **Event Viewer > Applications and Services
+Logs > Microsoft > Windows > CodeIntegrity > Operational**. Event **3077**
+records the policy block. A related **3089** entry with
+`TotalSignatureCount: 0` shows that the blocked file is unsigned. Match the
+events by their activity ID and check the blocked filename. See
+[Microsoft's App Control event reference](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/operations/event-id-explanations).
+
+### Windows path length during installation
+
+The installer creates nested folders under `.setup\staging`. A deep checkout
+or an extra folder from ZIP extraction can push the full path past the
+legacy Windows `MAX_PATH` limit of 260 characters, even when the installation
+folder itself has a short name. An affected operation may report
+`[WinError 3] The system cannot find the path specified` or `[WinError 206]`.
+Check the full path in the traceback. See [installation report #75](https://github.com/toyxyz/toyxyz_RGBMocap/issues/75).
+
+**Use a shorter folder first.** Clone or extract the source into a short,
+writable folder such as `C:\RGBMoCap`. Confirm that `install.cmd` is directly
+inside that folder, then run it from there. After setup, open saved projects
+from their existing locations and [reuse existing model files](#reuse-models-in-a-new-installation)
+as needed.
+
+**To keep the existing path**, run this command in PowerShell as Administrator.
+
+```powershell
+reg.exe add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+```
+
+Open a new terminal in the RGB MoCap folder and rerun `install.cmd`
+(`.\install.cmd` in PowerShell). If the setting has yet to take effect, restart
+Windows and retry. This setting applies to programs that declare long-path
+support. The bundled setup Python declares it. A shorter installation path
+can still help when another tool has its own path limit.
+See [Microsoft's Windows path length guidance](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation#enable-long-paths-in-windows-10-version-1607-and-later).
+
 ### Installation verification and repair
 
 First installation, changed dependencies and missing/changed runtime files still
@@ -286,9 +373,12 @@ are unchanged; no new runtime manager or separate PEAR setup command is required
 The base runtime transaction completes before PEAR and camera-alignment support
 are attempted independently. If only those support steps fail, setup reports
 **Installation complete with warnings** and the base app remains available.
-PEAR needs its own support; automatic MAMMA gravity needs camera-alignment
-support. Those capabilities remain unavailable until their preparation succeeds.
-Rerun `install.cmd`; the component summary is `.setup/git-components.json`.
+PEAR uses its own support, and automatic MAMMA gravity uses Camera Alignment.
+Both support checks require a CUDA-capable NVIDIA GPU and a compatible driver.
+If setup reports **Compatible NVIDIA GPU required** or CUDA is unavailable,
+run `nvidia-smi` to check driver detection and use **Help > Check System** in
+RGB MoCap to check the runtime. After resolving the reported error, rerun
+`install.cmd`. The component summary is `.setup/git-components.json`.
 Failed mandatory base installation or an unresolved update still blocks launch.
 Do not manually remove `.setup/git-sync.pending` to bypass that protection.
 
@@ -473,6 +563,26 @@ Automatic can overlap bounded CPU image preparation with GPU work when CPU/RAM
 headroom permits; Low Memory disables that prefetch. For measured worker-startup
 and feature-stage gains, see [resource modes and optimizations](PERFORMANCE.md).
 
+### RIFE frame interpolation
+
+**RIFE Frame Interpolation** is below the Movie Clip preview, next to **Find
+person** when that button is available. It starts off for new videos. Enable it
+to create a 30 fps working clip from a video below 30 fps before finding people
+or reconstructing. Inputs at 30 fps or higher still use the standard converter.
+The original video and audio are preserved.
+
+In **Model Manager**, open an offline model tab and use **Auto Download** on
+**RIFE 4.9 / Frame Interpolation (Optional)**. One approximately 21 MB model is
+shared by all offline workflows and verified with SHA-256. It requires the
+existing NVIDIA CUDA runtime and is excluded from **Download All**. You can
+also download the pinned model manually and use **Import...** on the same row.
+
+For ExMR, FlowHMR and GVHMR, run **Find person** again after changing the
+option if people were already detected. The new working clip has its own person
+detection and motion cache. In MAMMA, RIFE runs only on cameras below 30 fps
+and places them on the common trim's 30 fps grid. PEAR's live preview uses
+its existing input timing.
+
 ## Choose a model
 
 Each model has a [detailed guide](models/README.md): [ExMR](models/EXMR.md),
@@ -482,8 +592,10 @@ These cover required files, settings, defaults and workflow limitations.
 
 These quality comparisons are **subjective observations from our test videos**,
 not accuracy scores or a universal ranking. See the in-app **Model Guide** for
-recorded speed and memory measurements. New sessions start with **ExMR** selected;
-opening a project restores its saved model. **Prepare Preview**, below
+recorded speed and memory measurements. New sessions start with the offline model
+you last selected, saved locally with Resource Safety; PEAR is not remembered.
+**ExMR** is selected the first time, or when the remembered model's optional
+runtime is not installed. Opening a project restores its saved model. **Prepare Preview**, below
 **Reconstruct 3D**, prepares existing motion without running inference again.
 
 | Model | Observed strengths | Finger animation |
@@ -588,7 +700,26 @@ video does not always use more VRAM or take proportionally longer.
 
 ## Prepare models
 
-**Model Manager** lists files for the selected tool and its add-ons.
+**Model Manager** opens one window for all workflows. The current workflow's
+tab opens first. **Used by** lists the workflows that depend on each file.
+**Dedicated** identifies a model used by one workflow. **Shared** lists every
+workflow that uses the model, including optional features. The main workspace
+shows the required files for the current reconstruction settings.
+
+Open **Installed Models** to sort by file name, workflow or size. Filter by a
+workflow and enable **Dedicated only** to see files that can be removed without
+affecting other workflows. On any workflow tab or **Installed Models**, select
+one or more installed models and click **Delete Selected**. The confirmation
+shows the selected models, affected workflows and estimated reclaimed space.
+Open **Show Details** for exact file paths. **Cancel** is the default. Deleting
+a shared model removes it for every listed workflow.
+Use the workflow tab to download or import it again. Some saved projects need
+their body model for export.
+
+The estimate counts known hardlinks once and accounts for links that remain.
+Protected paths, independent runtime copies and older PEAR geometry generations
+can remain on disk. The active PEAR geometry is removed as a bundle. Imports
+keep their original source file.
 
 | Action | Meaning |
 | --- | --- |
@@ -843,23 +974,44 @@ Use **Clean** in Object Mode to review and remove inactive stream rigs in the cu
 
 Use **Bake** in Object Mode to save all recorded frames for the active streaming armature as a new Blender Action. If only one armature is streaming, Bake uses it automatically. The action includes root motion and uses the existing Blender scene FPS. Gaps between takes hold the previous pose until the next recorded frame. RGB MoCap can bake up to 36,000 timeline frames. After success, the app unchecks that person and the armature becomes a regular Blender object. Other people remain connected. Save the Blender file to keep the action. Use matching versions of RGB MoCap and the add-on for all controls.
 
+## Stream bones to Unreal Live Link
+
+In **Stream > Target**, choose **Unreal Live Link** and check prepared offline people.
+Run **Setup_UnrealStream.cmd** once first; it requires an installed Unreal Engine
+5.7+ and Visual Studio C++ tools. In Unreal enable the built-in Live Link and UDP
+Messaging plugins, then add **Message Bus Source > RGB MoCap**.
+The stream includes body and finger bones, reference poses and bone lengths.
+Use [RGB MoCap Connect](../unreal_plugin/RGBMoCapMetaHuman/README.md) to connect
+MetaHumans or UE5 Manny and Quinn. Select **Target type** for each new
+connection. Face applies to MetaHumans. The mannequin uses body motion.
+See the [full setup, network and retarget guide](UNREAL_LIVE_LINK.md).
+
+Use **Export Reference FBX...** for the highlighted person at a ready timeline
+frame to create a matching source Skeletal Mesh for Unreal IK retargeting.
+The reference preserves the current 52-bone or SOMA Native77 rest skeleton.
+It uses the existing Blender runtime and does not include motion or the human mesh.
+
 ## FBX and Blender
 
 **File → Export...** opens the options for the selected source model.
 For SMPL-based motion, choose **FBX (.fbx)**, **BVH (.bvh)** or
 **Blender project + video (.blend)**. The optional leading reference frame defaults off.
-For source FBX, choose **Rest pose → T-pose** (default) or **A-pose**.
+For **FBX profile → Generic / Blender**, choose **Rest pose → T-pose**
+(default) or **A-pose**.
 T-pose sets horizontal upper arms. A-pose sets the upper arms 54° below
 horizontal, based on the mean of the two upper-arm angles measured in
 [Epic's MetaHuman body reference rigs](https://github.com/EpicGames/MetaHuman-DNA-Calibration/tree/main/data/body).
 The rest pose selection works with Maya compatibility, per-person origin
 placement and, where offered, symmetrical rest. It preserves the recorded
-poses and length of each bone. The optional leading FBX frame uses the
-selected A- or T-pose.
+poses and length of each bone. To insert the selected reference at the start
+of the motion, enable **Add T-pose before motion** or **Add A-pose before
+motion**, depending on the selection.
 GEM-X offers [Native77 FBX, BVH and Blender exports](#gem-x-soma-blender-bundles).
-For FBX, enable **FBX Compatibility (Maya)** to use the included Blender
-runtime for the final export. The file retains the skeleton's rest pose and
+For **Generic / Blender** FBX, enable **FBX Compatibility (Maya)** to use the
+included Blender runtime for the final export. The file retains the skeleton's rest pose and
 animation and can also be opened in Blender. This option defaults off.
+For the stock Unreal skeleton and optional skinned mesh, see [UE5 Mannequin FBX](#ue5-mannequin-fbx).
+
 For SMPL BVH, choose **Generic / Blender** (default) or **3ds Max Biped** in the
 **BVH profile** list.
 When there are multiple takes to choose from, **Export scope** offers three choices.
@@ -909,7 +1061,16 @@ for Blender project exports and do not change imported-character exports.
   Source motion, correction results, viewport geometry and cached bind data remain
   unchanged. The option is a reference skeleton change, not an added T-pose frame.
 
-The export options window keeps the same size when switching formats.
+The export options window keeps the same size when switching formats. It also
+reopens with the choices from your last **Continue...**: format, profiles, rest pose,
+the leading reference frame, origin placement, symmetrical rest and **Export Face**
+settings, saved locally independently of projects. Export scope, chosen takes and
+Blender project settings are not remembered. A choice the selected model does not
+offer, such as **3ds Max Biped** for GEM-X, shows its default. **Export Character...**
+remembers its format, mesh and face choices in the same way. Click **Defaults** to
+restore the export options for the current window while keeping the export scope
+and chosen takes. **Continue...** or **Save** remembers the restored preferences.
+**Cancel** keeps the previously saved preferences.
 
 BVH uses the same 52-bone hierarchy, metre units and Y up, including finger bones
 and terminal tips. Import into Blender with **Scale 1 / Forward -Z / Up Y**.
@@ -1076,6 +1237,53 @@ or unsupported camera skew is rejected rather than silently exported incorrectly
 PC2 disk usage is about **120 KiB per frame per person** (10,475 vertices),
 in addition to videos, skeleton animation and the Blender file. Copies and
 mesh baking run outside the GUI with visible activity/progress and cancellation.
+
+## UE5 Mannequin FBX
+
+Use this source export profile with saved SMPL-based motion or GEM-X Native77
+motion. RGB MoCap retargets the take to the stock UE5 Manny or Quinn rig,
+including finger motion and leg reach calculated from the target lengths.
+Horizontal ankle spacing scales with the target's leg length, within each
+leg's reach. The export uses the bundled Blender runtime and works on a PC
+without Unreal.
+
+Both rig-only and skinned FBXs store the stock mannequin bind pose and keep
+the take's frame rate and frame count. The A/T rest pose and leading frame
+controls are available under **Generic / Blender**. Re-export any older
+Manny or Quinn FBX that imported with an animation frame as its rest pose
+or with incorrect foot spacing.
+
+The bundled Simple meshes are derived from the Unreal Engine 5.7.4 Third Person
+template. [Epic asset notice](../third_party/ue5_mannequin/NOTICE.md)
+
+1. Open **File > Export...** and choose **FBX (.fbx)**. Set **FBX profile** to
+   **UE5 Mannequin (Manny/Quinn)** and choose Manny or Quinn under
+   **Target mannequin**. Select the take or takes to export.
+2. Under **Root movement**, keep **Root Motion** to put horizontal travel on
+   the root bone, scaled to the target's leg length from a local origin. Choose
+   **In Place** to remove that travel. Both modes keep vertical motion and heading
+   on the pelvis.
+3. Leave **Include Mannequin Mesh** off to export the rig and animation for an
+   existing Unreal mannequin. Enable it to include the selected skinned mesh in
+   the same FBX. The mesh includes geometry, normals, UVs and skin weights.
+   Assign materials in Unreal.
+
+| Unreal project | Import settings |
+| --- | --- |
+| Existing stock mannequin | In the legacy importer, turn off **Import Mesh**, turn on **Import Animations**, and select **SK_Mannequin**. In Interchange, use **Import Only Animations** and select the same skeleton. |
+| No mannequin assets | Export with **Include Mannequin Mesh**, then import as a **Skeletal Mesh** with **Import Animations** on and leave **Skeleton** empty. Unreal creates the mesh, skeleton and Animation Sequence together. |
+
+When reusing the stock **SK_Mannequin**, use the same Manny or Quinn mesh for the
+animation preview and **Asset Details > Animation > Retarget Source Asset**.
+That sets the source proportions for the chosen target, including Quinn's
+pelvis height. Use the Animation Sequence in Sequencer or an Animation
+Blueprint. For gameplay root-motion extraction, also turn on **Enable Root
+Motion** in the Animation Sequence. Project-specific corrective pose
+processing and materials come from the Unreal project.
+
+For a missing or invalid bundled reference or mesh error, close RGB MoCap and
+run the normal [installation verification or repair](#installation-verification-and-repair).
+For Unreal streaming setup, see [Unreal Live Link](UNREAL_LIVE_LINK.md).
 
 ## Saved cameras and Camera Preview
 

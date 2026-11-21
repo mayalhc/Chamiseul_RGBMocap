@@ -22,7 +22,7 @@ from PySide6.QtCore import QElapsedTimer, QEvent, QProcess, QProcessEnvironment,
 from PySide6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QShortcut, QTextOption
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
     QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QTextEdit, QVBoxLayout, QWidget)
+    QAbstractItemView, QSplitter, QTabBar, QTableWidget, QTableWidgetItem, QTextBrowser, QTextEdit, QVBoxLayout, QWidget)
 
 from .models import MODELS_LIST, import_body_model, missing, ready
 from .paths import ROOT, PROJECTS, worker_command
@@ -54,6 +54,7 @@ from .theme import STYLE
 STAGES["mesh"] = "Prepare SMPL-X Mesh"
 STAGES['rig']='Prepare Bone Preview'
 STAGES['save_fbx']='Save FBX'
+STAGES['stream_reference']='Export Live Link Reference Rig'
 STAGES['copy_bvh']='Save BVH'
 STAGES['save_blend']='Save Blender Project'
 STAGES['save_blend_scene']='Save MAMMA Blender Scene'
@@ -170,34 +171,29 @@ class ModelDownloadDialog(QDialog):
             self.import_status.setVisible(bool(message))
 
 
+class ModelSizeItem(QTableWidgetItem):
+    def __lt__(self, other):
+        return self.data(Qt.UserRole) < other.data(Qt.UserRole)
+
+
 class ModelsDialog(QDialog):
     def __init__(self, window, tool_key=None):
         super().__init__(window)
+        from .model_manager import model_consumers, workflow_catalog, workflow_name
         self.window = window
-        self.tool = MOTION_TOOLS[tool_key or window.model_choice.currentData()]
-        from .models import STAGE_REQUIREMENTS
-        keys = ({key for key in STAGE_REQUIREMENTS[self.tool.key+'_assets']} if self.tool.key in ('mamma','prompthmr','pear','gemx') else
-                {key for stage in (*self.tool.stages(refine=True, footmr=True, handflow=True),'people') for key in STAGE_REQUIREMENTS.get(stage, ())})
-        if self.tool.key=='pear':keys.update(STAGE_REQUIREMENTS['pear_align'])
-        if self.tool.key=='prompthmr':keys.update(STAGE_REQUIREMENTS['prompthmr_camera_assets'])
-        from .sam31_runtime import SUPPORTED
-        if self.tool.key in SUPPORTED and window.people_tracker.currentData() == 'sam31':
-            keys.update(STAGE_REQUIREMENTS['sam31_people'])
-        if self.tool.key=='flowhmr':
-            keys.add('flow_metadata')
-            if window.flow_hamer.isChecked():
-                from .flow_hamer import MODEL_KEYS
-                keys.update(MODEL_KEYS)
-        # Keep public automatic downloads together, followed by manual-only files.
-        # Stable sorting preserves the existing component order within each group.
-        self.models = sorted((model for model in MODELS_LIST if model.key in keys),
-                             key=lambda model: not bool(model.drive_id or model.download_url))
-        self.setWindowTitle(f"{self.tool.label} Model Manager")
-        self.resize(850, min(540, max(360, self.screen().availableGeometry().height() - 80)))
+        self.catalog = workflow_catalog()
+        self.consumers = model_consumers(self.catalog)
+        self.setWindowTitle("Model Manager")
+        self.resize(1130, min(645, max(420, self.screen().availableGeometry().height() - 80)))
         layout = QVBoxLayout(self)
-        description = QLabel(f"Models for {self.tool.label} and compatible add-ons.\nUse Auto Download for public files, or Manual Download and Import for any model.\nRegistered body model files are not redistributed by this app.")
-        description.setWordWrap(True)
-        layout.addWidget(description)
+        self.tab_bar = QTabBar()
+        self.tab_bar.setObjectName('modelManagerTabs')
+        self.tab_bar.setExpanding(False)
+        for key in ('installed', *sorted(self.catalog, key=workflow_name)):
+            index = self.tab_bar.addTab('Installed Models' if key == 'installed' else workflow_name(key))
+            self.tab_bar.setTabData(index, key)
+            if key == (tool_key or window.model_choice.currentData()):
+                self.tab_bar.setCurrentIndex(index)
         # Every model file lives under this one folder. Import writes each checked
         # file to the path shown in its row, so users can also place a downloaded
         # file there themselves before importing it.
@@ -213,41 +209,31 @@ class ModelsDialog(QDialog):
         self.open_models_folder_button.clicked.connect(self.open_models_folder)
         folder.addWidget(self.open_models_folder_button)
         layout.addLayout(folder)
-        if self.tool.key in SUPPORTED and window.people_tracker.currentData() == 'sam31':
-            sam_note = QLabel('SAM 3.1 is optional. Close RGB MoCap and run Setup_SAM31.cmd once. '
-                              'Use Auto Download on the SAM 3.1 row for the public 1.75 GB checkpoint.')
-            sam_note.setWordWrap(True)
-            layout.addWidget(sam_note)
-        if self.tool.key=='mamma':
-            from .mamma_manager import runtime_panel
-            layout.addWidget(runtime_panel(self))
-        elif self.tool.key=='prompthmr':
-            from .prompthmr_manager import runtime_panel
-            layout.addWidget(runtime_panel(self))
-        elif self.tool.key=='gemx':
-            from .gemx_runtime import configuration
-            try:
-                configuration()
-            except RuntimeError as error:
-                message=str(error)
-            else:
-                message='GEM-X runtime is ready.'
-            note=QLabel(message+' Download All prepares nine files. Review the upstream terms before downloading. '
-                '<a style="color:#8ed2ff" href="https://huggingface.co/nvidia/GEM-X">GEM-X</a> · '
-                '<a style="color:#8ed2ff" href="https://huggingface.co/nvidia/SOMA-X">SOMA-X</a> · '
-                '<a style="color:#8ed2ff" href="https://github.com/open-mmlab/mmpose/tree/main/projects/rtmpose">Detector</a>')
-            note.setWordWrap(True)
-            note.setOpenExternalLinks(True)
-            layout.addWidget(note)
-        elif self.tool.key=='pear':
-            from .pear_runtime import status
-            note=QLabel(status()[1]+'\nPEAR support is included in install.cmd and update.cmd. Uses the existing shared runtime; Camera Align uses a small Flow-runtime support overlay. No CUDA compiler is needed. VGGT and GeoCalib are optional for multiple fixed views; model files are prepared separately below.')
-            note.setWordWrap(True);layout.addWidget(note)
-        self.table = QTableWidget(len(self.models), 3)
-        self.table.setHorizontalHeaderLabels(["Model", "Status", "Action"])
+        layout.addWidget(self.tab_bar)
+        self.workflow_panel = QVBoxLayout()
+        layout.addLayout(self.workflow_panel)
+        self.installed_filters = QWidget()
+        filter_layout = QHBoxLayout(self.installed_filters)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        self.workflow_filter = QComboBox()
+        self.workflow_filter.addItem('All workflows', '')
+        for key in sorted(self.catalog, key=workflow_name):
+            self.workflow_filter.addItem(workflow_name(key), key)
+        filter_layout.addWidget(QLabel('Workflow'))
+        filter_layout.addWidget(self.workflow_filter)
+        self.dedicated_only = QCheckBox('Dedicated only')
+        self.dedicated_only.setToolTip('Show models used by exactly one workflow.')
+        filter_layout.addWidget(self.dedicated_only)
+        filter_layout.addStretch()
+        self.storage_total = QLabel()
+        filter_layout.addWidget(self.storage_total)
+        layout.addWidget(self.installed_filters)
+        self.table = QTableWidget()
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 300)
-        self.table.setColumnWidth(1, 130)
         layout.addWidget(self.table)
         self.task_status = QTextBrowser()
         self.task_status.setFixedHeight(64)
@@ -274,6 +260,10 @@ class ModelsDialog(QDialog):
             "Download missing public model files. Files requiring registration must be downloaded manually and imported. Completed downloads are kept if you cancel or retry."))
         self.download_all.clicked.connect(self.start_download_all)
         actions.addWidget(self.download_all)
+        self.remove_button = QPushButton('Delete Selected...')
+        self.remove_button.setToolTip('Select installed model rows to review and confirm their removal.')
+        self.remove_button.clicked.connect(self.confirm_removal)
+        actions.addWidget(self.remove_button)
         close = QPushButton("Close")
         close.setToolTip(tooltip_text("Close Model Manager. Any running download or import continues in the main workspace."))
         close.clicked.connect(self.accept); actions.addWidget(close)
@@ -285,6 +275,179 @@ class ModelsDialog(QDialog):
         self.status_timer = QTimer(self)
         self.status_timer.setInterval(100)
         self.status_timer.timeout.connect(self.sync_task_status)
+        self.tab_bar.currentChanged.connect(self.switch_tab)
+        self.workflow_filter.currentIndexChanged.connect(self.refresh)
+        self.dedicated_only.toggled.connect(self.refresh)
+        self.table.itemSelectionChanged.connect(self.sync_delete_button)
+        self.switch_tab()
+
+    @property
+    def inventory_tab(self):
+        return self.tab_bar.tabData(self.tab_bar.currentIndex()) == 'installed'
+
+    def switch_tab(self):
+        key = self.tab_bar.tabData(self.tab_bar.currentIndex())
+        while self.workflow_panel.count():
+            note = self.workflow_panel.takeAt(0).widget()
+            note.hide()
+            note.deleteLater()
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        if self.inventory_tab:
+            self.models = []
+            headers = ['Model', 'File', 'Used by', 'Status', 'Size']
+            widths = (280, 190, 310, 140)
+        else:
+            self.tool = MOTION_TOOLS[key]
+            self.models = sorted((model for model in MODELS_LIST if model.key in self.catalog[key]),
+                                 key=lambda model: not bool(model.drive_id or model.download_url))
+            self.add_workflow_panel(key)
+            headers = ['Model', 'Used by', 'Status', 'Action']
+            widths = (285, 255, 85)
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        for column, width in enumerate(widths):
+            self.table.setColumnWidth(column, width)
+        self.installed_filters.setVisible(self.inventory_tab)
+        self.download_all.setVisible(not self.inventory_tab)
+        self.sync_progress_visibility()
+        self.refresh()
+
+    def add_workflow_panel(self, key):
+        if key in ('mamma', 'prompthmr'):
+            if key == 'mamma':
+                from .mamma_manager import runtime_panel
+            else:
+                from .prompthmr_manager import runtime_panel
+            self.workflow_panel.addWidget(runtime_panel(self))
+        elif key == 'gemx':
+            from .gemx_runtime import configuration
+            try:
+                configuration()
+            except (OSError, RuntimeError, ValueError) as error:
+                text = str(error)
+            else:
+                text = 'GEM-X runtime is ready.'
+            note = QLabel(text + ' Review the upstream terms before downloading. '
+                '<a style="color:#8ed2ff" href="https://huggingface.co/nvidia/GEM-X">GEM-X</a> · '
+                '<a style="color:#8ed2ff" href="https://huggingface.co/nvidia/SOMA-X">SOMA-X</a> · '
+                '<a style="color:#8ed2ff" href="https://github.com/open-mmlab/mmpose/tree/main/projects/rtmpose">Detector</a>')
+            note.setWordWrap(True)
+            note.setOpenExternalLinks(True)
+            self.workflow_panel.addWidget(note)
+        elif key == 'pear':
+            from .pear_runtime import status
+            note = QLabel(status()[1] + '\nCamera Align uses optional VGGT and GeoCalib files.')
+            note.setWordWrap(True)
+            self.workflow_panel.addWidget(note)
+        from .sam31_runtime import SUPPORTED
+        if key in SUPPORTED:
+            note = QLabel('SAM 3.1 is optional. Run Setup_SAM31.cmd with RGB MoCap closed before using it.')
+            note.setWordWrap(True)
+            self.workflow_panel.addWidget(note)
+
+    def usage_text(self, key):
+        from .model_manager import workflow_name
+        names = ', '.join(map(workflow_name, self.consumers[key]))
+        if len(self.consumers[key]) > 1:
+            return f'Shared: {names}'
+        return f'Dedicated: {names}' if names else 'Other registered model'
+
+    @staticmethod
+    def inspect_model_files(model):
+        from .model_manager import installed_files
+
+        try:
+            return installed_files(model)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            return ()
+
+    def refresh_inventory(self):
+        from .model_manager import file_size, installed_models, physical_bytes
+        key = self.workflow_filter.currentData()
+        selected = self.selected_models()
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        self.removable = set()
+        all_files = []
+        rows = []
+        for model in installed_models():
+            files = self.inspect_model_files(model)
+            all_files.extend(files)
+            consumers = self.consumers[model.key]
+            if (key and key not in consumers) or (self.dedicated_only.isChecked() and len(consumers) != 1):
+                continue
+            status = 'Protected'
+            if files and all(item is not None for item in files):
+                self.removable.add(model.key)
+                status = 'Ready' if ready(model) else 'Needs verification'
+            rows.append((model, status, physical_bytes(files) if files else None))
+        self.table.setRowCount(len(rows))
+        for index, (model, status, size) in enumerate(rows):
+            for column, text in enumerate((model.name, model.path.name, self.usage_text(model.key), status)):
+                item = QTableWidgetItem(text)
+                item.setToolTip(str(model.path) if column < 2 else text)
+                item.setData(Qt.UserRole, model.key)
+                self.table.setItem(index, column, item)
+            item = ModelSizeItem(file_size(size) if size is not None else 'Unknown')
+            item.setData(Qt.UserRole, -1 if size is None else size)
+            self.table.setItem(index, 4, item)
+            if model.key in selected:
+                for column in range(self.table.columnCount()):
+                    self.table.item(index, column).setSelected(True)
+        self.table.setSortingEnabled(True)
+        self.storage_total.setText(f'Total known model files: {file_size(physical_bytes(all_files))}')
+        self.sync_delete_button()
+
+    def selected_models(self):
+        return {item.data(Qt.UserRole) for item in self.table.selectedItems()
+                if item.column() == 0 and item.data(Qt.UserRole)}
+
+    def removal_idle(self):
+        return not (self.window.busy or getattr(self.window, '_pear_running', False)
+                    or getattr(self.window, 'pear_align_phase', None)
+                    or getattr(self.window, 'pear_session', None)
+                    or getattr(self.window, 'contact_saving', False))
+
+    def sync_delete_button(self):
+        selected = self.selected_models()
+        self.remove_button.setEnabled(bool(selected) and selected <= getattr(self, 'removable', set())
+                                      and self.removal_idle())
+
+    def confirm_removal(self):
+        from .model_manager import file_size, physical_bytes, removal_plan, remove_models, workflow_name
+        from .models import BY_KEY
+        keys = self.selected_models()
+        if not keys or not keys <= self.removable or not self.removal_idle():
+            return
+        try:
+            plan = removal_plan(keys)
+            shared = [key for key in keys if len(self.consumers[key]) > 1]
+            names = sorted({workflow_name(workflow) for key in keys for workflow in self.consumers[key]})
+            models = [BY_KEY[key] for key in sorted(keys)]
+            summary = ', '.join(model.name for model in models[:3])
+            if len(models) > 3:
+                summary += f', and {len(models) - 3} more'
+            dialog = QMessageBox(QMessageBox.Warning, 'Delete installed models?', '', QMessageBox.Cancel, self)
+            dialog.setTextFormat(Qt.PlainText)
+            warning = 'Shared models will be removed for all listed workflows.\n' if shared else ''
+            dialog.setText(f'Delete {summary}?\n\n' + warning
+                           + 'Affected workflows: ' + (', '.join(names) or 'Other registered model') + '\n'
+                           + 'Estimated disk space reclaimed: ' + file_size(physical_bytes(plan, reclaim=True)))
+            dialog.setInformativeText('Re-download or import these models from their workflow tabs when needed. '
+                                      'Reconstruction and some exports may require them again.')
+            details = [f'{model.name} — {self.usage_text(model.key)}' for model in models]
+            dialog.setDetailedText('\n'.join((*details, '', *(str(item.path) for item in plan))))
+            remove = dialog.addButton('Delete Models', QMessageBox.DestructiveRole)
+            dialog.setDefaultButton(QMessageBox.Cancel)
+            dialog.setEscapeButton(QMessageBox.Cancel)
+            dialog.exec()
+            if dialog.clickedButton() != remove or not self.removal_idle():
+                return
+            remove_models(keys, plan)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
+            QMessageBox.warning(self, 'Model removal', str(error))
+        self.window.update_readiness()
         self.refresh()
 
     def open_models_folder(self):
@@ -293,23 +456,35 @@ class ModelsDialog(QDialog):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(MODELS)))
 
     def refresh(self):
+        if self.inventory_tab:
+            self.refresh_inventory()
+            self._row_state = (self.window.busy, id(self.window.process), self.removal_idle())
+            return
+        self.table.setRowCount(len(self.models))
+        self.removable = set()
         from .models import STAGE_REQUIREMENTS
         for i, model in enumerate(self.models):
             name = model.name + (" (Optional: HTD / 2D)" if self.tool.key == "gvhmr" and model.key == "pva" else "")
             if self.tool.key=='pear' and model.key in STAGE_REQUIREMENTS['pear_align']:name+=' (Optional: Camera Align)'
             available = ready(model)
-            for column, text in ((0, name), (1, "Ready" if available else "Missing")):
+            files = self.inspect_model_files(model)
+            if files and all(item is not None for item in files):
+                self.removable.add(model.key)
+            for column, text in ((0, name), (1, self.usage_text(model.key)), (2, "Ready" if available else "Missing")):
                 item = self.table.item(i, column)
                 if item is None:
                     item = QTableWidgetItem(); self.table.setItem(i, column, item)
                 item.setText(text)
-                if column==0:item.setToolTip(str(model.path))
+                if column == 0:
+                    item.setData(Qt.UserRole, model.key)
+                item.setToolTip(str(model.path) if column == 0 else text)
                 item.setForeground(QColor("#d5d5d5" if available else "#ffb45c"))
                 font = item.font(); font.setBold(not available); item.setFont(font)
-                item.setToolTip(tooltip_text(("Registered. " if available else
-                    "Missing. Download it from the provider and use Import in this row; the app checks it, then registers it at:\n") +
-                    str(model.path)))
-            cell = self.table.cellWidget(i, 2)
+                if column == 0:
+                    item.setToolTip(tooltip_text(("Registered. " if available else
+                        "Missing. Download it from the provider and use Import in this row; the app checks it, then registers it at:\n") +
+                        str(model.path)))
+            cell = self.table.cellWidget(i, 3)
             if cell is None or cell.property("model_key") != model.key:
                 cell = QWidget(); cell.setProperty("model_key", model.key)
                 row = QHBoxLayout(cell); row.setContentsMargins(0, 0, 0, 0)
@@ -333,29 +508,45 @@ class ModelsDialog(QDialog):
                 cell.local.setToolTip(tooltip_text("Choose a model file you already downloaded. The app checks it before replacing any existing file."))
                 cell.local.clicked.connect(lambda checked=False, key=model.key: self.import_local_model(key))
                 row.addWidget(cell.local)
-                self.table.setCellWidget(i, 2, cell)
+                self.table.setCellWidget(i, 3, cell)
             if cell.automatic is not None:
                 cell.automatic.setEnabled(not self.window.busy and not available)
             cell.manual.setEnabled(True)
             cell.local.setEnabled(not self.window.busy)
         self.download_all.setEnabled(not self.window.busy and bool(self.pending_downloads()))
-        self._row_state = (self.window.busy, id(self.window.process))
+        self.sync_delete_button()
+        self._row_state = (self.window.busy, id(self.window.process), self.removal_idle())
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.refresh(); self.sync_task_status()
+        from .model_manager import recover_removal
+        if self.removal_idle():
+            try:
+                if recover_removal():
+                    self.window.update_readiness()
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
+                QMessageBox.warning(self, 'Model removal recovery', str(error))
+        self.refresh()
+        self.sync_task_status()
         self.status_timer.start()
 
     def hideEvent(self, event):
         self.status_timer.stop()
         super().hideEvent(event)
 
+    def sync_progress_visibility(self):
+        show_tasks = not self.inventory_tab or self.window.busy
+        self.task_status.setVisible(show_tasks)
+        self.task_progress.setVisible(show_tasks)
+        self.cancel_task.setVisible(show_tasks)
+
     def sync_task_status(self):
         # Poll only cheap GUI state; filesystem readiness is refreshed once per
         # worker transition, never on each progress update or every timer tick.
         w = self.window
-        row_state = (w.busy, id(w.process))
+        row_state = (w.busy, id(w.process), self.removal_idle())
         if row_state != self._row_state:
+            self.sync_progress_visibility()
             self.refresh()
         setup = w.current_stage in {"download", "import_model"}
         if w.busy and setup:
@@ -406,8 +597,14 @@ class ModelsDialog(QDialog):
             self.sync_task_status()
 
     def pending_downloads(self):
-        return [model for model in self.models
-                if model.key != 'sam31_people' and (model.drive_id or model.download_url) and not ready(model)]
+        from .flow_hamer import MODEL_KEYS
+        if self.inventory_tab:
+            return []
+        excluded = {'sam31_people', 'rife49'}
+        if self.tool.key == 'flowhmr' and not self.window.flow_hamer.isChecked():
+            excluded.update(MODEL_KEYS)
+        return [model for model in self.models if model.key not in excluded
+                and (model.drive_id or model.download_url) and not ready(model)]
 
     def start_download_all(self):
         if self.window.busy:
@@ -562,9 +759,14 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
     @read_only_checks
     def update_readiness(self):
         self.export_preview_action.setEnabled(self.preview_export_available())
+        self.rife_interpolation.setVisible(not self._pear_active)
         self.track_face.setVisible(not self._pear_active)
         self.face_overlay.setVisible(not self._pear_active)
+        for control in (self.set_neutral_face, self.reset_neutral_face, self.neutral_face_note):
+            control.setVisible(not self._pear_active)
         self.track_face.setEnabled(not self.busy and not self.contact_saving)
+        cache = getattr(self, '_face_playback', None)
+        self.update_neutral_face_controls(cache.archive if cache else None)
         if self._pear_active:
             if hasattr(self,'camera_tools'):self.camera_tools.sync()
             self.pear_sync_controls();return
@@ -590,7 +792,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         if tool.key=='prompthmr' and self.prompthmr_camera.currentData()=='moving':required.update(STAGE_REQUIREMENTS['prompthmr_camera_assets'])
         unavailable = [BY_KEY[key] for key in sorted(required) if not ready(BY_KEY[key])]
         count = len(required) - len(unavailable)
-        text = f"{tool.label}: {count}/{len(required)} models ready"
+        text = f"{tool.label} required files ready: {count}/{len(required)}"
         if unavailable:
             noun = "model" if len(unavailable) == 1 else "models"
             text += f"\nWarning: {len(unavailable)} required {noun} missing.\nOpen Model Manager to download or import."
@@ -2051,6 +2253,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             self.reset_people()
             self.motion_view.auto_fit = True
             self.video_path, self.project, self.info = path, None, None
+            self._rife_source_fps = 0
+            self.rife_interpolation.setChecked(False)
             self.setWindowTitle('RGB MoCap | Motion Workspace')
             self.flow_sampling.setCurrentIndex(self.flow_sampling.findData(0))
             self.fast_sam.setChecked(True)
@@ -2089,6 +2293,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.slider.set_media(self.info["fps"] if self.info else info["fps"])
         if self.project is None and not self._workspace_video_reference:
             self.info = info
+            self._rife_source_fps = info['fps']
             self.slider.setRange(0, max(0, info["frames"] - 1))
             self.source_offset, self.source_end = 0.0, info["duration"]
             self.slider.reset_trim()
@@ -2141,6 +2346,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             self.status.setText(str(error))
             return False
         manifest = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        self._rife_source_fps = float(manifest.get('source', {}).get('fps') or 0)
+        self.rife_interpolation.setChecked(bool(manifest.get('interpolation')))
         if manifest.get('pipeline',{}).get('model')=='prompthmr':
             group=(project/manifest.get('people_root','.')).resolve()
             if (group/'prompthmr_pending.json').exists():
@@ -3085,6 +3292,9 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.timer.start(max(1, math.ceil(remaining * 1000)))
 
     def shutdown_preview(self):
+        self.close_face_playback()
+        self._stream_timer.stop()
+        self.close_stream()
         if hasattr(self,'camera_tools'):self.camera_tools.close()
         self.shutdown_mamma()
         self.stop_playback()
@@ -3127,7 +3337,15 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         if not discovery and self._single_actor and not self._single_actor['checked']:
             self.status.setText('Check Person 1 in the People list to reconstruct it.')
             return
-        if not discovery and self.input_person_jobs(stages,result):
+        interpolation = self.selected_interpolation()
+        if not discovery and self.people_state is not None:
+            manifest = json.loads((self.people_root / 'project.json').read_bytes())
+            if manifest.get('interpolation', '') != interpolation:
+                self.status.setText('Video interpolation changed. Run Find person again, then reconstruct the selected people.')
+                return
+            if self.input_person_jobs(stages, result):
+                return
+        if not self.ready_for_interpolation(interpolation):
             return
         unavailable = [model for stage in stages for model in ([] if self.model_choice.currentData()=='flowhmr' and stage=='flow_camera' and self.flow_sampling.currentData()==-1 else missing('flow_export' if self.model_choice.currentData()=='flowhmr' and stage in ('correct','export') else stage))]
         if 'sam31_people' not in stages and self.model_choice.currentData()=='flowhmr' and self.flow_hamer.isChecked():
@@ -3141,6 +3359,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             return
         first, end = self.processing_range()
         prepare_args = ["--video", str(self.video_path), "--start", str(first), "--end", str(end)]
+        if interpolation:
+            prepare_args.append('--rife-interpolation')
         if self.workspace_root is not None:
             prepare_args += ['--project',str(self.workspace_root)]
         elif self.project is not None:
@@ -3376,6 +3596,14 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         os.environ[ENV]='1' if value else '0'
         self.log.append(message(value))
 
+    def remember_model_pick(self,index):
+        # Code changes the selector with signals blocked, so this is a user pick; skip it if select_model refused it.
+        model=self.model_choice.itemData(index)
+        if model!=self.model_choice.currentData():return
+        from .local_choices import remember_model
+        try:remember_model(model)
+        except (OSError,ValueError) as error:self.log.append('Cannot save the AI Motion Model choice: '+str(error))
+
     def start_jobs(self, jobs, refresh_characters=False):
         if self.busy:
             return
@@ -3485,12 +3713,13 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                                    (f' · Elapsed {duration(elapsed)}' if elapsed is not None else ''))
             self.progress.setRange(0, 100)
             self.progress.setValue(0 if self.failed or self.cancelled else 100)
-            if self.current_stage in ('save_fbx','copy_bvh','save_blend','save_blend_scene'):
+            if self.current_stage in ('save_fbx','copy_bvh','save_blend','save_blend_scene','stream_reference'):
                 # Saving a derived file does not replace scene/preview data.
                 # Reloading the people scene here moves a following camera.
                 if not self.failed and not self.cancelled:
                     paths=getattr(self,'_motion_export_targets',[])
-                    self.status.setText('Motion export complete.'+(' '+paths[0] if len(paths)==1 else f' {len(paths)} files.' if paths else ''))
+                    message = 'Reference rig export complete.' if self.current_stage == 'stream_reference' else 'Motion export complete.'
+                    self.status.setText(message+(' '+paths[0] if len(paths)==1 else f' {len(paths)} files.' if paths else ''))
                     for path in paths:self.log.append('Exported: '+path)
                 self.update_readiness()
                 return
@@ -4187,10 +4416,13 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                 row['prepend_tpose']=options.get('prepend_tpose',False)
                 row['export_face']=options.get('export_face',False)
                 row['face_format']=options.get('face_format','txt')
+                row['smooth_face']=options.get('smooth_face',False)
                 row['bvh_profile']=getattr(self,'_source_export_options',{}).get('bvh_profile','generic')
                 if compatible:row['fbx_compatibility']=True
-                if options.get('format') == 'fbx' and 'fbx_rest_pose' in options:
-                    row['fbx_rest_pose'] = options['fbx_rest_pose']
+                if fmt == 'fbx':
+                    for key in ('fbx_profile', 'fbx_rest_pose', 'ue5_target', 'ue5_in_place', 'ue5_include_mesh'):
+                        if key in options:
+                            row[key] = options[key]
                 for key in ('place_at_origin','symmetric_rest'):
                     row[key]=getattr(self,'_source_export_options',{}).get(key,False) and getattr(self,'_source_export_options',{}).get('format','fbx') in ('fbx','bvh')
                 row['origin_group']=str(Path(project).resolve())

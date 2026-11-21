@@ -5,7 +5,11 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
+import numpy as np
+
 from .face_data import FaceArchive, manifest, root_for
+from .face_smoothing import smooth_face_values
+from .face_neutral import neutral_frames, expression_values
 from .people_store import load_people, safe_child
 
 
@@ -38,7 +42,7 @@ def plan(request, stage):
         state=load_people(root)
         rows=[dict(project=str(safe_child(root,take['project'])),target=payload['target'],
                    rig_name=person['name'],export_face=True,
-                   face_format=payload.get('face_format','txt'))
+                   face_format=payload.get('face_format','txt'),smooth_face=payload.get('smooth_face',False))
               for person,take in scene_take_rows(state,payload['people'],payload.get('takes'))]
         origin=float(manifest(root)['start'])
         leading=False
@@ -57,7 +61,16 @@ def plan(request, stage):
     return [(row,origin,leading) for row in rows if row.get('export_face')]
 
 
-def write_txt(stream, archive, project, state, offset, leading, name):
+def expression_frames(archive, project, state, filtered):
+    for frame in range(int(state['frames'])):
+        slot, sample, source = archive.resolve(project, frame, state=state)
+        weights = None
+        if sample >= 0:
+            weights = archive.values[slot, sample] if filtered is None else filtered[sample]
+        yield frame, sample, source, weights
+
+
+def write_txt(stream, archive, project, state, offset, leading, name, filtered):
     fps=float(state['fps'])
     stream.write('# rgbmocap_face_v1\n')
     stream.write('# channels=ARKit52; tongueOut=unsupported_zero\n')
@@ -71,10 +84,9 @@ def write_txt(stream, archive, project, state, offset, leading, name):
     if leading:
         index=offset-1
         writer.writerow([index,f'{index/fps:.9f}','','','reference','',*([0.]*52)])
-    for frame in range(int(state['frames'])):
-        slot,sample,source=archive.resolve(project,frame,state=state)
+    for frame, sample, source, weights in expression_frames(archive, project, state, filtered):
         label='missing' if sample<0 else 'tracked' if sample==source else 'held'
-        coeff=['']*52 if sample<0 else [f'{v:.7f}' for v in archive.values[slot,sample]]
+        coeff=['']*52 if weights is None else [f'{v:.7f}' for v in weights]
         writer.writerow([frame+offset,f'{(frame+offset)/fps:.9f}',source,
             f'{state["start"]+frame/fps:.9f}',label,sample if sample>=0 else '',*coeff])
 
@@ -89,7 +101,7 @@ def live_link_timecode(frame, fps):
     return f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02}.{fraction:03}'
 
 
-def write_live_link_csv(stream, archive, project, state, offset, leading):
+def write_live_link_csv(stream, archive, project, state, offset, leading, filtered):
     fps = float(state['fps'])
     channels = [archive.channels.index(name) for name in LIVE_LINK_CHANNELS]
     empty = (0,) * len(channels)
@@ -99,20 +111,19 @@ def write_live_link_csv(stream, archive, project, state, offset, leading):
     writer.writerow(LIVE_LINK_HEADER)
     if leading:
         writer.writerow([live_link_timecode(offset - 1, fps), count, *empty, *rotations])
-    for frame in range(int(state['frames'])):
-        slot, sample, _ = archive.resolve(project, frame, state=state)
-        values = empty if sample < 0 else [f'{v:.7f}' for v in archive.values[slot, sample, channels]]
+    for frame, _, _, weights in expression_frames(archive, project, state, filtered):
+        values = empty if weights is None else [f'{weights[index]:.7f}' for index in channels]
         writer.writerow([live_link_timecode(frame + offset, fps), count, *values, *rotations])
 
 
-def write_sidecar(destination, archive, project, state, offset, leading, name):
+def write_sidecar(destination, archive, project, state, offset, leading, name, *, filtered=None):
     temp=destination.with_name('.'+uuid4().hex+'.partial')
     try:
         with temp.open('w',encoding='utf8',newline='') as stream:
             if destination.suffix == '.csv':
-                write_live_link_csv(stream, archive, project, state, offset, leading)
+                write_live_link_csv(stream, archive, project, state, offset, leading, filtered)
             else:
-                write_txt(stream, archive, project, state, offset, leading, name)
+                write_txt(stream, archive, project, state, offset, leading, name, filtered)
         for version in range(1,10000):
             target=destination if version==1 else destination.with_name(f'{destination.stem}_{version}{destination.suffix}')
             try:
@@ -130,6 +141,7 @@ def write_sidecar(destination, archive, project, state, offset, leading, name):
 
 def publish(rows, emit):
     archives={}
+    smoothed={}
     for ordinal,(row,origin,combined_lead) in enumerate(rows,1):
         project=Path(row['project'])
         target=Path(row['target'])
@@ -149,8 +161,17 @@ def publish(rows, emit):
             suffix='_face' if origin is None or len(rows)==1 else f'_face_{ordinal:02d}'
             extension = '.csv' if row.get('face_format') == 'livelink_csv' else '.txt'
             destination = target.with_name(target.stem + suffix + extension)
+            calibration = neutral_frames(archive)
+            filtered = None
+            smoothing = bool(row.get('smooth_face'))
+            if smoothing or person in calibration:
+                key = root, person, smoothing
+                if key not in smoothed:
+                    smoothed[key] = expression_values(archive, archive.index[person],
+                                                       smooth=smoothing, frames=calibration)
+                filtered = smoothed[key]
             written = write_sidecar(destination, archive, project, state, offset, leading,
-                                    row.get('rig_name','Person '+str(person)))
+                                    row.get('rig_name','Person '+str(person)), filtered=filtered)
             emit('info',message=f'Exported face {extension[1:].upper()}: {written}')
         except (OSError,ValueError,KeyError,IndexError) as error:
             emit('info',message=f'Face export for {row.get("rig_name","selected person")}: {error}')

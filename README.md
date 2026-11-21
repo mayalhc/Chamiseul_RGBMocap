@@ -96,14 +96,28 @@ https://github.com/user-attachments/assets/cc0e79bb-ecce-4752-ae14-3b6cea30c810
 
 [Download original sample](docs/samples/streaming-to-blender.mp4)
 
+### Unreal Engine MetaHuman live streaming
+
+https://github.com/user-attachments/assets/3353f5ca-6393-40af-822f-210a77f51003
+
 ## Install and run
 
-1. Install [Git for Windows](https://git-scm.com/download/win). Open **Command Prompt**
-   in a writable folder where you want to install RGB MoCap, then clone the repository:
+The steps below cover Windows. For the experimental x86-64 Linux AppImage and
+source installation, see the [Linux guide](https://github.com/toyxyz/toyxyz_RGBMocap/blob/linux_support/docs/LINUX.md#test-the-appimage-on-linux-mint).
+The AppImage was tested on WSL 2. Native Linux Mint testing is welcome.
+
+> [!IMPORTANT]
+> On Windows 11, Smart App Control in **On** mode may block the unsigned private
+> Python runtime used by RGB MoCap. This can stop installation or launch.
+> See [Smart App Control troubleshooting](docs/USER_GUIDE.md#smart-app-control-on-windows-11).
+
+1. Install [Git for Windows](https://git-scm.com/download/win). Use a short, writable
+   installation path such as `C:\RGBMoCap`. Open **Command Prompt** to clone
+   the repository. Adjust the path if you need a different folder.
 
    ```cmd
-   git clone https://github.com/mayalhc/Chamiseul_RGBMocap.git
-   cd Chamiseul_RGBMocap
+   git clone https://github.com/mayalhc/Chamiseul_RGBMocap.git C:\RGBMoCap
+   cd /d C:\RGBMoCap
    ```
 
 2. Prepare the runtimes for ExMR, FlowHMR and GVHMR with their supported add-ons,
@@ -123,6 +137,9 @@ https://github.com/user-attachments/assets/cc0e79bb-ecce-4752-ae14-3b6cea30c810
 
    Keep the console open while the app runs. Prepare the AI model files separately
    using **Model Manager**; some require account registration and manual download.
+
+If setup fails with `WinError 3` or `WinError 206` and the error shows a long
+path, see [Windows path length troubleshooting](docs/USER_GUIDE.md#windows-path-length-during-installation).
 
 To update, close the app and run `update.cmd` from the same folder. See the
 [installation guide](docs/USER_GUIDE.md#install) for disk space, prerequisites
@@ -170,7 +187,7 @@ See the [SAM 3.1 tracker guide](docs/models/SAM31.md#vram-use).
 **Track Face** adds CPU face tracking for saved video. The 3D viewport shows
 facial landmarks on SMPL-X, SMPL-H and SOMA surfaces. **Export Face** saves
 ARKit-style coefficients alongside the chosen motion as TXT or Unreal Live Link Face CSV.
-See [Face capture](docs/USER_GUIDE.md#face-capture).
+Face preview landmarks and Unreal-streamed expression coefficients use One Euro smoothing automatically. **Set Neutral** beside Track Face calibrates the selected person from the current frame, with saved per-person baselines and Reset. Saved face coefficients can also accompany Unreal Live Link body streaming; enable **Face** in the separately installed MetaHuman Connect plugin. See [Face capture](docs/USER_GUIDE.md#face-capture) and [face streaming](docs/UNREAL_LIVE_LINK.md#optional-metahuman-face-streaming).
 
 ### Install with an AI agent
 
@@ -210,14 +227,20 @@ do not put passwords or account tokens in the agent chat.
 
 ## Features
 
+- Optionally use RIFE frame interpolation for videos below 30 fps before offline
+  reconstruction. The standard converter is the default. [RIFE setup and usage](docs/USER_GUIDE.md#rife-frame-interpolation)
+
+- Manage model files across workflows in one window. See which workflows share each file, filter to dedicated models, and remove installed files after reviewing the affected workflows. [Model Manager guide](docs/USER_GUIDE.md#prepare-models)
 - Reconstruct one or several people and preview the body mesh and animation bones.
 - Reduce sliding with foot/palm contact correction and editable contact timings.
 - Retarget motion to Mixamo FBX, VRM and PMX humanoid characters.
 - Export source animation as FBX or BVH (Generic/Blender or 3ds Max Biped), with FBX A/T reference poses, an optional leading reference frame, per-person origin placement and symmetrical rest pose; export characters as FBX with or without meshes,
   or PMX character motion as VMD for MMD.
 - Export portable Blender projects with source animation, video and saved cameras; MAMMA can include animated body meshes and every camera.
+- Export animation for the stock UE5 Manny or Quinn skeleton. Include the bundled skinned mesh when the Unreal project has no mannequin assets. [UE5 mannequin FBX guide](docs/USER_GUIDE.md#ue5-mannequin-fbx)
 - Export the current take, all takes for checked people, or individual takes. The export dialog shows what to do for each unavailable take. [Export guide](docs/USER_GUIDE.md#fbx-and-blender)
 - Stream selected people's bones to Blender during playback or scrubbing, then bake their full recorded motion into Blender Actions. [Download the Blender add-on ZIP](blender_addon/rgbmocap_bone_stream.zip?raw=1) · [Installation and controls](docs/USER_GUIDE.md#stream-bones-to-blender)
+- Stream motion to UE5 Manny and Quinn or to MetaHuman actors through Unreal Live Link. MetaHumans also support tracked expressions. [RGB MoCap Connect 0.5.0 plugin ZIP (UE 5.7.4 / Win64)](https://github.com/toyxyz/toyxyz_RGBMocap/releases/download/unreal-rgbmocap-connect-v0.5.0/RGBMoCapConnect_UE5.7.4_Win64_v0.5.0.zip) · [Installation and controls](docs/UNREAL_LIVE_LINK.md)
 - Preview and correct GEM-X's native SOMA motion, retarget to humanoid characters, and export the Native77 skeleton as FBX or BVH. The Blender bundle includes the evaluated surface and input video.
 - Save side-by-side input video and the current 3D viewport as MP4 with **File > Export Preview...** (offline models).
 - Inspect source-video/bone alignment in Camera Preview and display saved cameras in 3D, with optional background rotation refinement for FlowHMR/ExMR.
@@ -241,6 +264,9 @@ do not put passwords or account tokens in the agent chat.
    and click **Apply Correction**.
 4. Use **File > Export...** to choose a format supported by the source model, or
    import a character, retarget the motion and export it.
+
+In Blender 5.0 or later, use the [Toyxyz Blender Retargeter](https://github.com/toyxyz/toyxyz-blender-retargeter)
+add-on to transfer exported RGB MoCap animation to another humanoid rig.
 
 **PEAR · Live (Experimental)** tracks webcam or video input in real time. Tracking
 and pose estimates may be unstable. Click **Start Live Tracking** to attempt camera

@@ -7,6 +7,11 @@ retained license files and provider agreements contain the full terms.
 
 ## AI tools and models
 
+Optional RIFE frame interpolation uses an inference-only adaptation of the
+[ComfyUI-Frame-Interpolation RIFE network](https://github.com/Fannovel16/ComfyUI-Frame-Interpolation/tree/26545cc2dd95bc3d27f056016300673bdeee78f5/vfi_models/rife).
+The [upstream MIT license](third_party/RIFE/LICENSE) is retained. Model Manager
+downloads the pinned RIFE 4.9 weights separately and verifies their SHA-256.
+
 PromptHMR's optional moving-camera support downloads [DroidCalib](https://github.com/boschresearch/DroidCalib)
 (AGPL-3.0), [LieTorch](https://github.com/princeton-vl/lietorch) (BSD-3-Clause),
 Eigen and torch-scatter with their provider licenses into the local support
@@ -21,8 +26,15 @@ Character import, baking and portable scene export use a separate, unmodified Bl
 FBX sampler in `mocap/retarget/selective_fbx.py` retains Blender's GPL terms.
 The VRM add-on, mmd_tools and OpenCC retain their own notices under
 `third_party/character_import` (VRM_LICENSE.txt, VRM_MIT.txt, VRM_NOTICE.txt,
-MMD_LICENSE.txt, OPENCC_LICENSE.txt). Imported character files and textures remain the user's assets;
-they are not bundled with the application.
+MMD_LICENSE.txt, OPENCC_LICENSE.txt). User-imported character files and textures stay in the user's workspace.
+
+The UE5 Mannequin FBX profile includes Manny and Quinn mesh and reference rig
+data derived from Epic Games' installed Unreal Engine 5.7.4 Third Person
+template. The [Epic asset notice](third_party/ue5_mannequin/NOTICE.md) records
+their source, conversion and applicable Unreal Engine EULA. RGB MoCap uses
+Unreal® Engine template assets. Unreal® is a trademark or registered trademark
+of Epic Games, Inc. in the United States of America and elsewhere.
+Unreal® Engine, Copyright 1998 – 2026, Epic Games, Inc. All rights reserved.
 
 | Component | License / essential conditions |
 | --- | --- |
@@ -106,3 +118,15 @@ existing Flow runtime. VGGT retains its existing upstream/model terms; its weigh
 file is reused, not bundled again. GeoCalib's public checkpoint is obtained
 separately through Model Manager under CC BY 4.0; the upstream
 LICENSE-WEIGHTS is retained with support files. No TensorRT engine/runtime is distributed.
+
+
+## Optional Unreal Live Link sender
+
+RGB MoCap authors the optional provider/commandlet source in
+`developer-build/unreal-live-link`. Setup builds it locally against the user's
+separately installed Unreal Engine. The installation retains its Epic notices
+and terms; no Unreal Engine binaries or MetaHuman assets are bundled in this
+source checkout. The separately downloadable Unreal sample contains a generated
+MetaHuman assembly under its applicable Epic terms; its own asset notices
+distinguish that content from RGB MoCap-authored MIT material.
+The receiver uses Unreal's built-in Live Link Message Bus Source.

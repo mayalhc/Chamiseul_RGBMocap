@@ -7,11 +7,19 @@ This guide is for agents helping users operate or modify RGB MoCap. It describes
 - Windows 64-bit, compatible NVIDIA GPU/driver and OpenGL 4.3 are required for the documented inference workflow. Other systems and GPUs were not comprehensively verified; see [validation](VALIDATION.md).
 - In a writable checkout, run `install.cmd` once. It sets up separate pinned profiles for ExMR, FlowHMR and GVHMR and their supported add-ons, PEAR support over the shared runtime, Blender 4.5, FFmpeg and the prebuilt native motion-correction module. It does not install only the selected model's runtime or obtain AI weights/body data. Downloading and disk space are required. Models are obtained separately. Optional MAMMA, PromptHMR and GEM-X have separate setup commands.
 - Run `RGBMoCap.cmd`. Keep its command window open; launch errors, processing messages and app Console output are also sent there, but long messages can be truncated and a saturated output queue can drop messages. Within the GUI, **Help > Check System** checks the system.
+- On Windows 11, Smart App Control in **On** mode can block the unsigned app-local Python at setup or launch. Check the blocked filename and CodeIntegrity events **3077** and **3089**. See the [installation troubleshooting guide](USER_GUIDE.md#smart-app-control-on-windows-11).
 - Base worker commands use explicit `-X utf8`, including isolated `-I` launches. Isolated mode ignores `PYTHONIOENCODING`/`PYTHONUTF8` from the parent environment. Any redirected/discarded text log stream must also specify UTF-8. Keep byte-oriented PEAR IPC unchanged.
 - Close the app before `update.cmd`. The updater requires a clean tracked worktree and the `main` branch, uses `git pull --ff-only`, then verifies/repairs runtime configuration. It refuses tracked local edits. A plain `git pull` does not perform runtime repair; use `install.cmd` after dependency changes when needed. Do not discard local edits or force an update.
 - `update.cmd` buffers its final command block before Git can replace it. Reporting/pause belongs to `tools/git_update.py`; failures preserve the subprocess status (ordinary exceptions use 1, Python-intercepted cancellation uses 130). Keep delayed expansion off for paths/arguments. The final `CALL` expands only a numeric exit status after clearing an environment shadow; never reparse paths or arguments with `CALL`. Already-running older launchers remain vulnerable during their first transition. From an open CMD in the app folder, `runtime\python.exe -I -X utf8 -B tools\git_update.py` bypasses the old wrapper. A stray command error after reported installation completion calls for rerunning the updated launcher, not deleting setup markers or models. See [update recovery](USER_GUIDE.md#installation-verification-and-repair) and the preceding transition note. Forced console termination/deletion of the running launcher is outside this guarantee.
 - For setup failure, read the message, check connectivity and free space, then retry `install.cmd`. Preserve models, projects and `.setup` state. Do not repeatedly reinstall or redownload models without evidence.
-- Base completion and optional PEAR/camera-alignment readiness are separate. A post-commit support failure reports completion with warnings; it must not recreate the global base pending marker. Inspect `.setup/git-components.json` and the actual capability configuration. Retry with `install.cmd`; camera-alignment preparation is independent of PEAR and also serves MAMMA automatic gravity. Mandatory base failures and unresolved promotion journals remain blocking. Never delete a pending marker blindly.
+- If installation fails with `WinError 3` or `WinError 206`, inspect the full
+  path in the traceback. A path near or above 260 characters under
+  `.setup\staging` can indicate the Windows path limit. Try a short, writable
+  checkout first. If the user wants to keep their path, use the documented
+  `LongPathsEnabled` steps and retry from a new process. The setting is
+  system-wide and requires administrator privileges. See
+  [Windows path length troubleshooting](USER_GUIDE.md#windows-path-length-during-installation).
+- Base completion and optional PEAR/camera-alignment readiness are separate. A post-commit support failure reports completion with warnings; it must not recreate the global base pending marker. Inspect `.setup/git-components.json` and the actual capability configuration. Both support checks require CUDA. For GPU warnings, check driver detection with `nvidia-smi` and verify CUDA in **Help > Check System** before retrying `install.cmd`. Camera-alignment preparation is independent of PEAR and also serves MAMMA automatic gravity. Mandatory base failures and unresolved promotion journals remain blocking. Never delete a pending marker blindly.
 - Recent full runtime checks are reused for up to seven days with matching group/verifier identities and an unchanged bounded file inventory, including additions/removals. Reuse does not refresh the full-check date. `install.cmd --verify-all` or `update.cmd --verify-all` forces the existing RECORD hashes/import checks. Missing/expired metadata, dependency changes and detected file changes trigger full checks for affected groups/dependents. Metadata is a change-detection heuristic, not an authenticity guarantee. Do not mark a runtime verified without an actual successful check.
 - `tools/pinned_download.py` supplies bounded HTTPS retries/resume for support archives. Keep certificate verification, HTTPS redirects, exact size and SHA-256, validated Content-Range, cancellation propagation and finite attempt/time limits. Ordinary base wheel downloads and optional package fetching retain their own paths; do not claim this replaces every network call. Source contracts are frozen/rechecked during base installation. A failed Git pull must preserve any pre-existing incomplete-install marker.
 - Base installation currently estimates at least 32.4 GiB free before models; ExMR/FlowHMR/GVHMR and add-ons were previously measured around 29 GiB of weights. Optional MAMMA, PromptHMR and GEM-X add separate runtimes and model files. With GEM-X CUDA sharing, the six offline model/runtime sets total about **72.46 GiB (77.8 GB)** before optional PromptHMR moving-camera support, excluding caches, projects, downloads and compiler tools, counting shared files once. Camera support adds about **1.57 GiB** (18.6 MiB modules and 1.55 GiB weights). See the [installed-size table](USER_GUIDE.md#installed-size); installed size and temporary setup headroom are different. Measurements are not guarantees.
@@ -52,6 +60,17 @@ additional HaMeR child pass. HaMeR is an optional finger-accuracy refinement,
 not a guarantee of better results for every video.
 
 ## Models and model files
+
+The unified Model Manager builds its workflow tabs and **Used by** labels from
+the stage requirements plus shared discovery and optional features.
+**Installed Models > Dedicated only** filters to assets used by one workflow.
+Every workflow tab and **Installed Models** open the same confirmation for
+**Delete Selected**. **Cancel** is the default.
+Removal identifies exact catalog paths and confirmed runtime hardlinks or
+symbolic links. It stages the files on the same volume and records the work for
+recovery when the manager next opens. Keep projects, external source files and
+unverified runtime copies out of removal. For troubleshooting, check the
+affected workflows and planned paths shown in the confirmation first.
 
 ExMR's integrated v0.1.5 uses public `pipeline.hand_boxes`, `model_inputs` and
 `ExMR.from_pretrained` with direct model forward. Keep stage-scoped model reuse
@@ -212,7 +231,11 @@ clock and fractional frames for other export rates. The Unreal importer infers
 Verify per-person associations, hold behavior, zero placeholders, leading frames
 and imported Level Sequence timing. For playback, open the imported sequence
 in Sequencer and bind the assembled MetaHuman actor to its Live Link subject.
-The user guide lists the controls verified in Unreal Engine 5.7.
+The user guide lists the controls verified in Unreal Engine 5.7. The export
+UI enables **Smooth Face** by default. The worker reuses the PEAR adaptive
+filter on each actor's valid capture samples before resolving export frames.
+Keep unfiltered captures reusable and use the same filtered values for TXT and
+CSV. Missing and held frame behavior follows the existing export rules.
 
 ### PromptHMR setup and verification
 
@@ -341,7 +364,19 @@ change is needed. Paired 7/14.2-second mask tests cut time 17–21%, changed RAM
 
 ### Capture, correction and export
 
-1. Select an AI Motion Model and prepare its models, then **File > Open Video** and optionally trim the Video track. Select MAMMA before opening multiple videos. New work defaults to ExMR.
+The optional **RIFE Frame Interpolation** control under Movie Clip defaults
+off. Enable it before **Find person** or **Reconstruct 3D** on footage below
+30 fps. Confirm the shared RIFE 4.9 model in Model Manager. Model Manager
+verifies the checkpoint separately and **Download All** skips it. The
+converter uses source presentation timestamps, avoids interpolating across
+detected cuts and streams adjacent frames. Keep the original media and its
+timeline intact. Key prepared clips and detection caches by the interpolation
+recipe. An existing person selection must be detected again on the new working
+clip after changing modes. PromptHMR and MAMMA use separate inference identities
+for RIFE. MAMMA keeps a common 30 fps grid for mixed camera rates. See
+[the user guide](USER_GUIDE.md#rife-frame-interpolation).
+
+1. Select an AI Motion Model and prepare its models, then **File > Open Video** and optionally trim the Video track. Select MAMMA before opening multiple videos. New sessions start on the last offline model picked in the selector, otherwise ExMR.
 2. For ExMR, FlowHMR and GVHMR with multiple people, use **Find person** and check the desired rows; without it, automatic tracking selects one person and can switch identity on overlap. PromptHMR tracks people jointly during reconstruction; its People setting is a maximum count and Interaction Prompt is optional. MAMMA instead detects and matches people during reconstruction; Find person is hidden and its People setting controls the count. A checked row controls visibility and ExMR/FlowHMR/GVHMR processing targets; the selected row controls the current timeline and contact edits.
 3. Choose camera and processing settings, then **Reconstruct 3D**. Processing runs on a 30 fps working clip, without changing the original video. Progress and cancellation are in the app. **Prepare Preview** rebuilds previews from existing motion without rerunning inference.
 4. Review motion and contacts. **Enable Correction** selects corrected output; Foot defaults on and Hand off for new work. Flat Ground uses a common floor; Multi Level retains inferred contact heights and does not reconstruct terrain. Inspect automatic contacts; hand contacts represent support, not hanging/object tracking.
@@ -384,6 +419,96 @@ See the [installation steps and controls](USER_GUIDE.md#stream-bones-to-blender)
 `mocap/stream_ui.py` samples ready frames for checked offline people, independently of People visibility. Multi-person streams use each take's shared scene transform. Selecting PEAR stops the stream. `mocap/bone_stream.py` sends Blender Z-up rest and pose matrices on a background thread and keeps only the latest live snapshot. The listener binds to `127.0.0.1` on the port selected in the Stream tab, default `49168`. The port is a session setting and **Reset** restores the default when available. Bind the replacement listener before closing an active stream so a port conflict leaves the current connection intact. The receiver must use the same port and reconnect after a successful change. Selection metadata is requested by compatible receivers.
 
 `blender_addon/rgbmocap_bone_stream.py` applies poses on Blender's main thread, within the scene and view layer chosen at Connect. The stream collection stores references to its original armatures, keyed by person and rest skeleton. Keep those references when reusing rigs. Clean checks selection and scene references again at confirmation and skips armatures used by other objects. Bake reads the recorded takes on the sender thread, writes a separate Action in Blender, and detaches only after the action is assigned successfully. The app unchecks that person after Blender acknowledges completion.
+
+### Unreal Live Link body streaming
+
+RGB MoCap Connect 0.5.0 supports MetaHuman and UE5 mannequin targets. The
+[Unreal installation and controls guide](UNREAL_LIVE_LINK.md) covers both
+connection types. The main README links to the 0.5.0 Win64 receiver ZIP.
+The inline
+[MetaHuman streaming demo](../README.md#unreal-engine-metahuman-live-streaming)
+lives under Sample videos. Use the [plugin guide](../unreal_plugin/RGBMoCapMetaHuman/README.md)
+for receiver installation and connection. The Unreal guide also covers the
+manual reference FBX and IK Retargeter workflow.
+
+The selected editor target type applies to the next connection. Each
+URGBMoCapConnectComponent persists its own type and defaults to MetaHuman
+for older maps and Blueprint callers. Resolve the primary Character mesh or
+one compatible mannequin mesh. Share validation between the editor and runtime.
+Keep source-qualified body and reference sampling unchanged. For mannequins,
+read the target rest skeleton, use a shared horizontal ankle offset and drive
+the stock hand and foot IK guides. Verify editor save and disconnect restore
+the target's original animation and preview tick settings.
+
+Stream target 2 is Unreal Live Link. Target 0 is None and target 1 is Blender.
+Keep PEAR excluded.
+`Setup_UnrealStream.cmd` / `tools/setup_unreal_stream.py` build the source in
+`developer-build/unreal-live-link` against the user's installed UE 5.7+ and
+verify commandlet startup before keeping a receipt in `runtime_unreal_stream`.
+They do not modify the shared inference registry or distribute engine binaries.
+
+Before running it, verify the normal `install.cmd` runtime exists, close RGB
+MoCap and check Unreal plus Visual Studio 2022 **Desktop development with C++**
+(MSVC toolchain and Windows SDK). Do not infer compiler readiness merely from
+an installed Unreal editor. The prebuilt MetaHuman Connect receiver targets
+stock UE 5.7.4; use the receiving project's matching engine for sender setup.
+From the app root, run `.\Setup_UnrealStream.cmd` in PowerShell (or
+`Setup_UnrealStream.cmd` in CMD). For a custom/multiple-engine installation use
+`.\Setup_UnrealStream.cmd --engine "D:\Epic Games\UE_5.7"`; the argument is the
+installation root containing `Engine`, not the project or executable. Automatic
+discovery only checks the standard `Program Files\Epic Games\UE_5.*` location.
+
+Read the exit status and the **Live Link support built** completion line; the
+wrapper's final pause is not proof of success. Setup verifies the actual local
+provider handshake before accepting its receipt. On failure, resolve the stated
+runtime/compiler/engine error and retry; preserve user projects and previous
+receipts, and redact logs before sharing. Reopen the app after success. Rebuild
+after provider source or engine changes; this is not a per-session step.
+`install.cmd`/`update.cmd` do not run this optional setup, and installing the
+receiver ZIP does not replace it. See [Prepare once](UNREAL_LIVE_LINK.md#prepare-once).
+
+`mocap/unreal_stream.py` shares the prepared StreamRig/playhead source contract,
+converts off the GUI thread, and retains a bounded latest snapshot. The bridge
+uses official ILiveLinkProvider and stock Message Bus reception. Do not replace
+the verified cm/parent-local quaternion basis with Blender matrices directly:
+rest and animation must use the same handedness/facing conversion. Preserve
+multi-person scene transforms, reference/leaf lengths, removal on missing motion,
+reference refresh on rest changes, and actual Provider HasConnection status.
+
+Default paused pose refresh is 30 Hz and reference 10 Hz. Switching targets,
+entering PEAR or exiting closes only this app's owned bridge. Window close/aboutToQuit
+explicitly closes the transport; its non-daemon thread reaps the owned process off
+the GUI thread. Do not rely on the thread flag to initiate shutdown; a lost IPC heartbeat
+also stops the native bridge. Keep Blender's port rollback, packets and Bake
+commands on its own path. Test numeric round trips, real native reception and
+GUI selection/seek/scope changes. Receipt/build success alone does not verify
+MetaHuman retarget quality. Do not copy test MetaHuman assets into the repository.
+
+The Stream **Export Reference FBX...** button freezes the highlighted person's
+current stream rig, independently of its checkbox/connection. With only one
+listed person, export selects that row if no row is current. Do not silently
+choose among multiple people. Report missing selection, unavailable playhead
+motion and export errors with a visible message box as well as status/log text;
+checkbox-only selection must not look like a dead Export button. `stream_reference`
+is dispatched by `worker_progress.py` in the shared CPU runtime; do not put this
+presentation-only operation in the inference fingerprint worker. The reference
+writer derives the same Unreal local rest transforms as `rig_schema`, attaches
+a procedural weighted mesh to every joint, then uses the installed Blender
+writer to produce a standard FBX with no animation/extra leaf bones. Preserve
+the verified cm/unit-scale and Z/X bone-axis options in
+`mocap/stream_reference_scene.py`. Raw intermediate FBX is private to Blender.
+Final files are atomically published; owned staging/requests are cleaned on
+success, failure or cancellation. Failed export must retain an existing target.
+A reference-only completion must not reload the people scene or change playback
+placement. Window/app shutdown must close the stream even when no job is busy.
+
+The final reference display mesh is rebuilt in the imported armature's local
+space inside Blender, with weight-1 named groups and a standard Armature modifier.
+Do not reuse the intermediate display skin's bind matrices or change the verified
+reference/pose basis to compensate for geometry errors. Validate displayed skin
+separately from skeleton matrices. Keep Unicode label/name limits consistent with
+Unreal FString UTF-16 lengths; truncate labels without splitting a code point,
+and reject overlong bone identities rather than truncating them.
 
 ### Saved camera display and source export implementation
 
@@ -480,6 +605,46 @@ selected reference. Older requests without the field use the legacy writer
 behavior. Validate the bind and keyed/fractional poses after reimport, including
 the Blender compatibility pass.
 
+### UE5 Mannequin FBX export implementation
+
+The `ue5_mannequin` FBX profile selects `ue5_target` (`manny` or `quinn`)
+and `ue5_in_place`. The default-off `ue5_include_mesh` sends the chosen
+stock skin to the Blender worker. The profile uses the same committed take
+and generation checks as Generic FBX and supports mapped SMPL and SOMA
+Native77 inputs. `mocap/ue5_reference.py` loads the bundled reference and skin
+under `third_party/ue5_mannequin`. Keep the Epic notice with the 5.7.4 Third
+Person template data. Match the skin and reference to the same template build
+and update their byte counts and hashes in `installer/source-resources.json`
+and `SOURCE_MANIFEST.json` after regeneration. Follow the
+[bundle notice](../third_party/ue5_mannequin/NOTICE.md) for provenance and build
+commands. Export needs the character Blender runtime. The Live Link sender
+and MetaHuman receiver are separate from this export path. See the
+[user workflow](USER_GUIDE.md#ue5-mannequin-fbx) for Unreal import settings.
+
+`mocap/ue5_retarget.py` uses source pose deltas, target lengths, a fixed-length
+leg solve and target-oriented IK helper tracks. The stock root carries planar
+translation only. Keep one horizontal offset for both ankle targets so the
+source stance width scales with the target leg length.
+`mocap/ue5_fbx_scene.py` writes the optional skin and animation with Blender in
+the owned export staging directory. The rig-only path emits an explicit FBX
+`BindPose` record. Preserve the stock rest transforms in both output modes,
+including a unit-scale root and centimetre bone offsets. Match the elbow and wrist
+directions from source joint positions. Calibrate palm and finger axes from
+both rigs' geometry, including the source's registered terminal tip offsets.
+Test Manny and Quinn against Epic's existing `SK_Mannequin`. Compare the
+evaluated elbow plane, palm and all digit directions to the source alongside
+timing, scale and skeleton-asset preservation. With the skin enabled, verify
+mesh deformation in Blender and test Legacy and Interchange imports in a fresh
+Unreal project with no mannequin assets. Check that each importer creates a
+Skeletal Mesh, Skeleton and Animation Sequence with the stock hierarchy.
+Compare bind transforms and evaluated poses against the rig-only export.
+Use a take whose first motion frame differs from the stock pose. An importer
+can use frame 0 as the reference when it rejects the FBX bind pose. Check a
+take with varied ankle spacing and verify root travel with `ue5_in_place`
+both enabled and disabled. See the
+[bind pose and foot spacing checks](VALIDATION.md#ue5-mannequin-bind-pose-and-foot-spacing-2026-11-20)
+and [original mesh export checks](VALIDATION.md#ue5-mannequin-fbx-with-optional-mesh-2026-11-20).
+
 ### Portable Blender export implementation
 
 Source FBX/BVH requests accept default-off `place_at_origin` and `symmetric_rest`.
@@ -559,7 +724,8 @@ recheck the space budget before falling back to copying. Keep project manifests
 independent so staging can rewrite location metadata. Character index writes
 preserve unreadable input files before committing a replacement.
 
-- Default projects live under `<installation>/projects/`; **Save Project As** creates and switches to a copy at a user-selected location. Open the saved `project.json` using **File > Open Project**. A project contains model-specific `exmr`, `flowhmr`, `gvhmr`, `mamma` or `prompthmr` result folders; model switching loads existing results when available. MAMMA saves all input camera videos. People, takes, contact edits and imported characters are project data.
+- Default projects live under `<installation>/projects/`; **Save Project As** creates and switches to a copy at a user-selected location. Open the saved `project.json` using **File > Open Project**. A project contains model-specific `exmr`, `flowhmr`, `gvhmr`, `mamma` or `prompthmr` result folders; model switching loads existing results when available. For MAMMA, **Save Project As** copies the original camera inputs into the saved project. People, takes, contact edits and imported characters are project data.
+- A saved MAMMA take restores camera thumbnails and switching from the prepared clips in the project, including when originals are missing. Keep camera order and the saved take offset. Disable a view when both its prepared clip and original are unavailable. Keep original input paths and metadata for reconstruction. See [MAMMA playback](MAMMA.md#reconstruct-and-export).
 - `models/`, `projects/`, `cache/`, `character_scenes/`, `runtime*/` and `.setup/` are local data, not source artifacts. User project folders can also be outside the checkout. Never assume `.gitignore` protects a path that was already tracked or will be force-added. Check `git status` and tracked files before committing; do not upload model weights, video, personal data, credentials, generated motion or caches. Explicitly approved README sample assets are exceptions.
 - Preserve source videos, registered weights and project data. Do not delete project subfolders, results or receipts to fix a problem: they can be referenced by saved metadata. Cache cleanup and setup-download cleanup are distinct from deleting saved work; see [storage and cleanup](USER_GUIDE.md#storage-and-cleanup). Obtain authorization for destructive cleanup.
 - `mocap/paths.py` defines `ROOT`, `RGB_MOCAP_DATA`, models and projects; normal portable startup sets its own data location. When diagnosing an actual run inspect the effective environment rather than assuming a path.
@@ -587,6 +753,21 @@ worker runtimes, including isolated launches; only explicit `0` disables it.
 PEAR workers inherit the same preference. Never remove actual OOM handling or
 change model equations/precision when extending this control. Model result
 identity must not include this local checkbox value.
+
+`mocap/local_choices.py` keeps window conveniences in the same file through
+`resource_safety.update`. `source_export` and `character_export` hold the last
+choices confirmed in each export window, under the request option names; take
+scope, chosen takes and Blender project settings are excluded. `motion_model`
+holds the last offline model picked in the selector. Only user picks are saved,
+PEAR is never saved, and opening a project restores its own model without
+writing the file. Missing, malformed or unoffered values fall back to the window
+defaults; a saved MAMMA, PromptHMR or GEM-X model without a configured runtime
+starts ExMR. These are not project data or inference identities, and they do not
+change what an export writes for given options. **Defaults** restores each
+dialog's initial export controls, including the Blender controls in the source
+dialog. Preserve the current take selection and scope. Discard retained
+unavailable choices on reset and persist the restored preferences only when
+the dialog is accepted.
 
 Use **Resource Mode > Automatic** by default. It keeps the fast path when the current GPU budget is sufficient and selects supported Low Memory paths per operation when needed. A supported fast operation that raises CUDA OOM is released and retried once in Low Memory. ExMR Low Memory uses CPU-first body/hand loading and converts Sapiens' existing FP16 layers before GPU transfer; ExMR body/hand batches stay 8. FlowHMR offloads SAM/VGGT blocks; MAMMA offloads VGGT camera blocks while retaining its pinned masks/landmark/fitting settings. GVHMR/add-ons retain adaptive image batches and full-context attention. The saved Automatic selection is not changed. Resource decisions and memory advice appear in the app Console and CMD. Model precision, frame count, resolution and iterations are not reduced. CPU loading/offloading can be slower and use more RAM; it is not a promise every clip will fit. Estimates select a path, never reject a job. With Resource Safety enabled, the desktop checks actual RAM and Windows allocation headroom every 0.5 seconds and stops workers when these become low. Preserve completed stages, genuine model limits and original motion. Do not rerun inference for operations that can use existing results.
 
@@ -710,7 +891,7 @@ The app uses separate runtime profiles to maintain compatibility, with bounded b
 
 ## Code map and verification
 
-- GUI, people, controls and logging: `mocap/gui.py`, `workspace_ui.py`, `people_ui.py`, `character_ui.py`, `console_log.py`, `tooltips.py`.
+- GUI, people, controls and logging: `mocap/gui.py`, `workspace_ui.py`, `people_ui.py`, `character_ui.py`, `console_log.py`, `tooltips.py`; remembered window choices: `local_choices.py`.
 - Model selection and loading: `mocap/motion_tools.py`, `models.py`, `model_guide.py`; worker routing and runtimes: `worker.py`, `worker_progress.py`, `runtime_registry.py`, `compute_policy.py`.
 - MAMMA inputs/UI: `mocap/mamma_inputs.py`, `mamma_ui.py`; processing: `mamma_pipeline.py`, `mamma_camera.py`, `mamma_publish.py`, `mamma_body.py`; runtime/assets: `mamma_runtime.py`, `mamma_manager.py`, `mamma_models.py`, `installer/mamma-runtime-lock.json`, `tools/setup_mamma.py`. Follow [the native-build runbook](MAMMA_AGENT_SETUP.md) instead of guessing module build commands.
 - PromptHMR UI/pipeline: `mocap/prompthmr_ui.py`, `prompthmr_pipeline.py`, `prompthmr_cache.py`, `prompthmr_publish.py`, `prompthmr_scene.py`; runtime/assets: `prompthmr_runtime.py`, `prompthmr_manager.py`, `prompthmr_models.py`, `prompthmr_worker_boot.py`, `installer/prompthmr-runtime-lock.json`, `installer/prompthmr_adapters.py`, `installer/verify_prompthmr.py`, `tools/setup_prompthmr.py`. Follow the separate setup/verification steps above.
@@ -955,3 +1136,117 @@ Cyrillic, Korean, Chinese, combining accents and emoji paths on one Windows PC.
 Hostile parent encodings were simulated; different OS languages, clean installs
 and fresh CUDA compilation in every such path were not independently tested.
 See the [validation record](VALIDATION.md#international-windows-paths-and-output-2026-11-02).
+
+
+### Unreal face stream contract
+
+`StreamWorkspace.stream_face_at_playhead` reads only a verified FaceArchive.
+Resolve each person/take through FaceArchive.resolve and its source-time/FPS
+mapping; use held valid samples and send no face before the first success.
+Keep person IDs scoped to the body actor identity. Archive errors must not stop
+body streaming. Face Overlay and the new-capture Track Face toggle do not hide
+already recorded coefficients. Do not perform MediaPipe inference on this path.
+The optional face packet has 52 finite values, integer sample/source_frame and
+tracked metadata. The bridge publishes a separate Animation-role `_Face` Subject
+with the canonical capitalized ARKit names, BodySubject metadata and matching
+provider identity, and repeats paused expressions. Remove it when unavailable;
+body FaceAvailable metadata distinguishes no sample from a stale connection.
+Keep the default body-only packet and Blender protocol unchanged.
+
+RGB MoCap Connect has per-source Face switches for MetaHuman targets. Scope
+the switch to MetaHuman connections even when the same source drives a mannequin.
+Skip face sampling and mapping entirely for mannequins. For MetaHumans, the
+plugin applies the target's additive ARKit mapping curves to the native face preview,
+preserves postprocess/RigLogic and restores the prior face class. Do not toggle
+the MetaHuman actor's global UseLiveLink/UseARKit construction-script settings:
+those can replace Body animation. Validate jaw/blink deformation, person
+isolation, no-face/held samples, seeks, toggle/disconnect restoration and editor
+save/Undo/reconstruction. Enable and restore the face mesh editor-update/visibility tick flags as well as
+its animation class; receiving values or a Streaming status alone do not prove deformation.
+The optional sender runtime uses Bridge-<source hash> projects and validates
+receipt-relative paths. Keep older active modules intact during setup and roll
+back a previous receipt if startup verification fails.
+
+
+The MetaHuman Face initialization callback can disable editor updates on Body
+and its followers. Reapply the connection's owned preview tick settings after
+face initialization or restoration, and retain the original recovery baseline.
+Validate body transforms and facial deformation across seeks and continuous
+Face-enabled playback.
+
+Receiver 0.5.0 uses the 0.4.0 sender protocol. When upgrading from an older
+sender, update the app and rerun `Setup_UnrealStream.cmd`. Close Unreal before
+replacing the project plugin folder.
+
+
+### Shared face playback smoothing
+
+`face_smoothing.py` owns the channel profiles and causal valid-sample One Euro
+sequence computation; `face_export.py` re-exports smooth_face_values to retain
+its existing API and output numerics. Eye/gaze and lip landmark offsets use
+responsive profiles; per-point XY vectors share a cutoff to avoid axis skew.
+`face_playback.py` prepares a private FaceArchive copy on a single cancellable
+QThread with one latest pending request. Replace only its in-memory values and
+offsets, then expose read-only arrays. Never rewrite face_capture.npz or modify
+FaceArchive's raw-loading/export behavior. The overlay and stream use the same
+FaceWorkspace cache; when ready it repaints and invalidates the paused stream
+snapshot. Do not send raw values while preparation is pending.
+Archive/source manifests identify each cache generation; discard stale replies
+after project/file changes. GUI shutdown cancels and waits for this worker.
+Resolve smoothed samples through the original held/valid arrays and source-time
+mapping. Compute once from capture start so seek order cannot alter smoothing.
+Keep export smoothing optional, avoid double filtering, and test raw preservation,
+export equality, detection gaps, multiple people, reverse seeks, background
+cancellation and actual Unreal-received coefficients.
+
+
+### Neutral face calibration
+
+`face_neutral.py` stores person IDs and valid capture-frame indices in a separate
+versioned face_neutral.json, scoped to FaceArchive.identity. Do not add this file
+to the capture fingerprint or mutate captured arrays/files. Save Project As
+already copies project-local files with timestamps; no model/runtimes are needed.
+Reject held/missing frames, map a selected take through FaceArchive.resolve, and
+apply only to the currently selected People row (not every checked person or a
+selected imported character). Reset preserves other people's entries.
+
+Calibrate AFTER smoothing so the chosen smoothed frame is exactly neutral:
+coefficients = clamp((value - baseline) / max(1 - baseline, 0.1), 0, 1).
+The gain cap avoids amplifying near-saturated neutral channels without bound;
+decreases below baseline do not invent an inverse ARKit expression. Subtract
+the same-frame filtered landmark offsets from the filtered landmark sequence.
+For unsmoothed export, derive the baseline from the raw sequence at that same
+saved frame instead. Use expression_values on raw FaceArchive inputs only;
+do not calibrate an already prepared playback archive twice.
+
+FacePlayback.archive_key includes the neutral sidecar. Set/Reset invalidates
+the shared preview/stream cache, and the existing ready callback repaints and
+resends a paused frame. Keep preparing off the GUI thread. Do not change body
+motion, Live Link subject identity, frame/timecode or the receiver plugin for
+neutral calibration. Verify per-person isolation, exact zero at the chosen
+frame, raw preservation, valid/held rejection, offset take timing, reset/reload,
+and TXT/Live Link Face CSV with Smooth Face both on and off.
+
+
+### Public Unreal receiver package
+
+Authored receiver source is in unreal_plugin/RGBMoCapMetaHuman. The release ZIP
+is built by tools/package_unreal_plugin.py from that source and matching locally
+compiled modules. Require the exact supported UE build ID, source-byte identity,
+an explicit allowlist, archive CRC/SHA-256 and a clean extracted-package load.
+No engine/MetaHuman assets, private diagnostic modules, PDBs, screenshots of
+private projects, personal paths, capture arrays or local logs belong in the
+source or package. Logical #line filenames keep authored assertion diagnostics
+portable without embedding the build directory. Scan both ASCII and UTF-16 DLL
+strings and the full new Git diff before publishing.
+
+The bridge now takes its per-launch nonce from RGB_MOCAP_STREAM_TOKEN in the
+owned child environment, clears it there and authenticates only the loopback
+application hop. Never claim stock UDP Message Bus is authenticated/encrypted.
+The receiver evaluates exact source-qualified subjects and requires matching
+body/reference RigId plus body/face RigId/MotionFrame metadata. A Face checkbox
+is a receiver application setting, not an outgoing privacy control. Target None
+and app person checkboxes stop publication. Keep the network boundary explicit.
+On source changes rerun Setup_UnrealStream.cmd; it freezes and rechecks source
+identity excluding generated build outputs and rolls back a previous receipt if
+startup verification fails. Do not publish local receipts or process logs.
