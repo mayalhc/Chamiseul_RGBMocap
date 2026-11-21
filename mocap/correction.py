@@ -29,7 +29,17 @@ def backend():
     files=list(folder.glob('_motion_correction*.pyd'))
     if not files:raise RuntimeError('Motion Correction runtime is missing. Reinstall or rebuild the app.')
     spec=importlib.util.spec_from_file_location('_motion_correction',files[0])
-    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    try:
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    except ImportError as error:
+        # The bare Windows loader message names neither the CPU nor the runtime.
+        from .diagnostics import cpu
+        info=cpu()
+        hint=('This CPU has no AVX; run update.cmd to get the build that does not need it. '
+              if info.get('avx') is False else '')
+        raise RuntimeError(f'Motion Correction runtime could not load ({error}). CPU: {info["name"]}. '
+                           +hint+'Install the Microsoft Visual C++ 2015-2022 x64 Redistributable, restart Windows, '
+                           'then run update.cmd.') from error
     return module
 
 

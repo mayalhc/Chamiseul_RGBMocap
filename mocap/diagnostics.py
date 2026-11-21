@@ -2,6 +2,32 @@ from __future__ import annotations
 
 import platform
 
+# IsProcessorFeaturePresent ids (winnt.h).
+_FEATURES = {"sse4_2": 38, "avx": 39, "avx2": 40, "avx512f": 41}
+
+
+def cpu() -> dict:
+    """The processor name and the SIMD extensions native modules may need.
+
+    A module compiled for an extension the CPU lacks fails to import with
+    "DLL initialization routine failed", which reads like a broken install.
+    """
+    info = {"name": platform.processor() or "unknown"}
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+            info["name"] = str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+    except (ImportError, OSError):
+        pass
+    try:
+        import ctypes
+        present = ctypes.windll.kernel32.IsProcessorFeaturePresent
+        info.update({name: bool(present(code)) for name, code in _FEATURES.items()})
+    except (AttributeError, OSError):
+        pass
+    return info
+
 
 def collect() -> dict:
     import psutil
@@ -9,7 +35,8 @@ def collect() -> dict:
     from .gpu_support import evaluate, query, torch_arches
 
     result = {"platform": platform.platform(), "python": platform.python_version(),
-              "ram_gib": round(psutil.virtual_memory().total / 1024**3, 1), "cuda": False}
+              "ram_gib": round(psutil.virtual_memory().total / 1024**3, 1), "cuda": False,
+              "cpu": cpu()}
     installed = query()
     device = installed[0] if installed else {}
     try:
