@@ -164,8 +164,8 @@ def bake(payloads, fps, clear=True, port=PORT, batch=20, progress=None):
         channel.close()
     if not reply.get('ok'):
         return False, str(reply.get('error') or '3ds Max could not finish the bake')
-    return True, 'Baked %s frames (%s-%s) as keyframes.' % (
-        reply.get('frames'), reply.get('first'), reply.get('last'))
+    return True, ('Sent %s frames (%s-%s). 3ds Max is keying them now and shows a message '
+                  'when it is done.' % (reply.get('frames'), reply.get('first'), reply.get('last')))
 
 
 def _yaw_z(degrees):
@@ -265,6 +265,19 @@ class MaxLink:
 
     def status(self, timeout=1.5):
         """What the receiver inside 3ds Max says about itself, or None."""
+        try:
+            return _get(_url(self.port, '/status'), timeout=timeout)
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+
+    def ping(self, timeout=1.5):
+        """The receiver's status, or None if it did not answer.
+
+        A closed 3ds Max does not refuse the connection on every machine (here it
+        simply never answers), so a timeout cannot be told from "busy" by itself.
+        3ds Max is only called gone after several misses in a row, and the
+        receiver answers status from its own thread, so a busy one still answers.
+        """
         try:
             return _get(_url(self.port, '/status'), timeout=timeout)
         except (urllib.error.URLError, OSError, ValueError):

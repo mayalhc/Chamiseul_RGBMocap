@@ -3156,8 +3156,39 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                     continue
             link.publish(frame, key=index)
 
+    def start_max_when_playing(self, index):
+        """The Live Link is on but had no take to bind when it was turned on
+        ("Play a reconstructed take to stream it"): the first frame played binds it.
+        Tried at most once a second, so a 3ds Max that went away costs nothing."""
+        if time.monotonic() - getattr(self, 'max_started_at', 0.0) < 1.0:
+            return
+        self.max_started_at = time.monotonic()
+        rows = self.ue_scene_rows()
+        if rows is not None and len(rows) >= 2:
+            self.start_max_people(rows)
+            return
+        found = self.live_body_frame(index)
+        if found is None:
+            return
+        body, body_index, transform = found
+        link = self.max_link
+        link.transform = transform
+        ok, message = link.start(body, body_index)
+        self.log.append('3ds Max: ' + message)
+        if ok:
+            self.status.setText(message)
+        else:
+            self.max_link_failed(message)
+
     def publish_max_frame(self, index):
         link = getattr(self, 'max_link', None)
+        action = getattr(self, 'max_link_action', None)
+        if (link is not None and not link.active and link.body is None and not link.error
+                and action is not None and action.isChecked()
+                and not getattr(self, 'max_people', None) and getattr(self, 'max_requests', None) is not None
+                and self.max_request_timer().isActive()):
+            self.start_max_when_playing(index)
+            return
         if link is None or not link.active:
             people = getattr(self, 'max_people', None)
             if not people:
@@ -3216,17 +3247,21 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         if self.max_bake_running:
             return
         links = self.max_bound_links()
-        if not links:
-            # Every stream gave up: 3ds Max is gone.
-            self.max_connection_lost(next(iter(getattr(self, 'max_people', {}).values()), None)
-                                     or getattr(self, 'max_link', None))
+        every = list(getattr(self, 'max_people', {}).values()) + [getattr(self, 'max_link', None)]
+        if any(each is not None and each.body is None and each.error for each in every):
+            # A stream gave up sending: 3ds Max is gone.
+            self.max_connection_lost()
             return
-        if getattr(self, 'max_missed', 0) >= 3:
+        if getattr(self, 'max_missed', 0) >= 4:
             self.max_connection_lost()
             return
         if getattr(self, 'max_request_busy', False):
             return
-        link = next(iter(links.values()))
+        # With no take bound yet (the Live Link is on, waiting for one) 3ds Max is
+        # still watched, through the link object itself.
+        link = next(iter(links.values()), None) or getattr(self, 'max_link', None)
+        if link is None:
+            return
         if getattr(self, 'max_bake_wanted', False):
             self.max_bake_wanted = False
             self.bake_take_to_max()
@@ -3240,9 +3275,10 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
 
         def ask():
             try:
-                state = link.status(timeout=0.8)
+                state = link.ping(timeout=2.0)
                 if state is None:
                     self.max_missed = getattr(self, 'max_missed', 0) + 1
+                    self.max_missed_most = max(getattr(self, 'max_missed_most', 0), self.max_missed)
                 else:
                     self.max_missed = 0
                     if state.get('bake_requested'):
