@@ -3147,6 +3147,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             if link is None:
                 continue
             link.transform = _transform
+            if link.body is None and link.error:
+                continue            # gave up (3ds Max closed): the watcher switches the link off
             if body is not link.body:
                 ok, message = link.start(body, frame, publish_first=False)
                 if not ok:
@@ -3167,6 +3169,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                 return
             if link is None or not link.active:
                 return
+            if link.body is None and link.error:
+                return              # it gave up: the watcher switches the link off
             found = self.live_body_frame(index)
             if found is None:
                 return
@@ -3203,36 +3207,71 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         return ''
 
     def poll_max_requests(self):
-        """A bake asked for from the RGB MoCap menu in 3ds Max is answered here.
+        """Watch the link to 3ds Max and answer a bake asked for from its menu.
 
         The receiver is asked on a worker thread (the answer can take a moment);
-        the bake itself reads the scene and so runs on this one.
+        the bake itself reads the scene and so runs on this one. If 3ds Max stops
+        answering (it was closed) the Live Link is switched off, once.
         """
-        if getattr(self, 'max_request_busy', False) or self.max_bake_running:
+        if self.max_bake_running:
             return
-        link = next(iter(self.max_bound_links().values()), None)
+        links = self.max_bound_links()
+        if not links:
+            # Every stream gave up: 3ds Max is gone.
+            self.max_connection_lost(next(iter(getattr(self, 'max_people', {}).values()), None)
+                                     or getattr(self, 'max_link', None))
+            return
+        if getattr(self, 'max_missed', 0) >= 3:
+            self.max_connection_lost()
+            return
+        if getattr(self, 'max_request_busy', False):
+            return
+        link = next(iter(links.values()))
         if getattr(self, 'max_bake_wanted', False):
             self.max_bake_wanted = False
             self.bake_take_to_max()
-            if not self.max_bake_running and link is not None:
+            if not self.max_bake_running:
                 # Nothing started (see the message in the status bar): tell Max
                 # so its request does not stay open.
                 threading.Thread(target=lambda: link.channel.post('/bake', {'op': 'cancel'}),
                                  name='rgbmocap-max-cancel', daemon=True).start()
             return
-        if link is None:
-            return
         self.max_request_busy = True
 
         def ask():
             try:
-                state = link.status(timeout=0.8) or {}
-                if state.get('bake_requested'):
-                    self.max_bake_wanted = True
+                state = link.status(timeout=0.8)
+                if state is None:
+                    self.max_missed = getattr(self, 'max_missed', 0) + 1
+                else:
+                    self.max_missed = 0
+                    if state.get('bake_requested'):
+                        self.max_bake_wanted = True
+            except Exception:                   # noqa: BLE001 - counted as a miss
+                self.max_missed = getattr(self, 'max_missed', 0) + 1
             finally:
                 self.max_request_busy = False
 
         threading.Thread(target=ask, name='rgbmocap-max-requests', daemon=True).start()
+
+    def max_connection_lost(self, link=None):
+        """3ds Max went away: stop streaming and untick Live Link to 3ds Max."""
+        if getattr(self, 'max_losing', False):
+            return
+        self.max_losing = True
+        try:
+            self.max_request_timer().stop()
+            self.max_poll_timer().stop()
+            for each in list(getattr(self, 'max_people', {}).values()) + [getattr(self, 'max_link', None)]:
+                if each is not None:
+                    each.stop()
+            self.stop_max_people()
+            self.max_missed = 0
+            message = '3ds Max was closed or stopped answering, so the Live Link was switched off. Turn it on again when 3ds Max is open.'
+            self.log.append('3ds Max: ' + message)
+            self.max_link_failed(message)
+        finally:
+            self.max_losing = False
 
     def bake_take_to_max(self):
         """Key the clip, every frame, into 3ds Max (asked for from its RGB MoCap menu)."""

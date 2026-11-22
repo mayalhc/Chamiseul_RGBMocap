@@ -58,6 +58,10 @@ RECEIVER = 'max_receiver.py'
 PUBLISH_LIMIT = 240
 PUBLISH_BATCH = 6
 
+# Sends that may fail in a row before the link gives up (a few seconds): 3ds Max
+# was closed, so the stream stops instead of looking for its port for ever.
+MAX_FAILURES = 12
+
 DEFAULT_FACING = 0.0
 
 # The prepared T-pose body the Cascadeur and Unreal links already ship: the
@@ -644,12 +648,13 @@ class MaxLink:
                         if index not in self._pending_set:
                             self._pending.appendleft(index)
                             self._pending_set.add(index)
-                if self.failures > 600:
+                if self.failures > MAX_FAILURES:
                     self.error = '3ds Max stopped answering on port %d (%s)' % (
                         self.port, error)
                     self.body = None
                     return
-                time.sleep(0.05)
+                # A closed 3ds Max refuses at once: do not hammer the port.
+                time.sleep(min(0.6, 0.05 * self.failures))
                 continue
             if not reply.get('ok'):
                 self.failures += 1
