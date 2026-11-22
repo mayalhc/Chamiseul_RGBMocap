@@ -1,5 +1,22 @@
 # RGB MoCap
 
+> ## Release notes
+>
+> **Latest update: run `install.cmd` after you update.** Run it once after every
+> `update.cmd` / `git pull`, before launching the app. If it was skipped, the app can
+> stop at launch with "Run install.cmd before launching".
+>
+> - **Motion Correction runs on older CPUs.** The correction module no longer needs
+>   AVX, so processors without it (older Xeons, for example) no longer fail with
+>   "DLL initialization routine failed". A failed load now names the CPU and the fix.
+> - **Merged the latest upstream:** RIFE frame interpolation, UE5 Manny/Quinn FBX
+>   export, Message Bus Live Link, the tabbed Model Manager and remembered export options.
+> - **3ds Max:** one character per person on screen. The app only sends the motion and
+>   answers a Bake request; keyframes (Record, Bake, delete keys, person assignment) are
+>   made from the RGB MoCap menu inside 3ds Max, from the separately distributed plug-in.
+> - **Live Link:** planted feet stay planted in Unreal, Blender and 3ds Max, and a
+>   shared floor placement is applied to every person.
+
 ![RGB MoCap workspace showing video tracking and a 3D motion preview](docs/images/rgbmocap-workspace.png)
 
 A native Windows app that turns video into editable human animation. Review and
