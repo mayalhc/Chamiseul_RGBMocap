@@ -18,7 +18,7 @@ from pathlib import Path
 import time
 import traceback
 
-from PySide6.QtCore import QElapsedTimer, QEvent, QProcess, QProcessEnvironment, QTimer, Qt, QUrl
+from PySide6.QtCore import QElapsedTimer, QEvent, QProcess, QProcessEnvironment, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QShortcut, QTextOption
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
     QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
@@ -657,8 +657,12 @@ from .pear_ui import PearWorkspace
 from .preview_export_ui import PreviewExportWorkspace
 
 class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWorkspace,MammaWorkspace,CharacterWorkspace,ModelWorkspace,ProjectSaving,PeopleWorkspace,StreamWorkspace,FaceWorkspace,QMainWindow):
+    max_bake_done = Signal()
+
     def __init__(self, video: Path | None = None):
         super().__init__()
+        self.max_bake_running = False
+        self.max_bake_done.connect(self.max_bake_finished)
         self.init_mamma()
         self.setWindowTitle("RGB MoCap | Motion Workspace")
         self.resize(1440, 880)
@@ -3125,7 +3129,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         if not started:
             self.max_link_failed(failed[0] if failed else 'no character to drive')
 
-    def publish_max_people(self, rows):
+    def publish_max_people(self, rows, index=None):
         for number, (_subject, body, frame, _transform) in enumerate(rows, 1):
             link = self.max_people.get(number)
             if link is None:
@@ -3136,7 +3140,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                 if not ok:
                     self.log.append('3ds Max: person %d: %s' % (number, message))
                     continue
-            link.publish(frame)
+            link.publish(frame, key=index)
 
     def publish_max_frame(self, index):
         link = getattr(self, 'max_link', None)
@@ -3147,7 +3151,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         try:
             rows = self.ue_scene_rows()
             if rows is not None and len(rows) >= 2 and getattr(self, 'max_people', None):
-                self.publish_max_people(rows)
+                self.publish_max_people(rows, index)
                 return
             if link is None or not link.active:
                 return
@@ -3164,9 +3168,139 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
                 if not ok:
                     self.max_link_failed(message)
                     return
-            link.publish(body_index)
+            link.publish(body_index, key=index)
         except Exception as error:              # noqa: BLE001 - logged, not raised
             self.log.append('3ds Max live: ' + str(error))
+
+    # -- 3ds Max keyframes: Record Live and Bake Take --------------------
+    def max_bound_links(self):
+        """The links that have a take bound in 3ds Max: {person number: link}."""
+        people = getattr(self, 'max_people', None)
+        if people:
+            return {number: link for number, link in people.items() if link.body is not None}
+        link = getattr(self, 'max_link', None)
+        if link is not None and link.body is not None:
+            return {1: link}
+        return {}
+
+    def max_keys_blocked(self):
+        """Why keyframes cannot be written now, or ''."""
+        if not self.max_bound_links():
+            return ('Turn on File > Live Link to 3ds Max first (and play a reconstructed take): '
+                    'keys are written onto the characters it drives.')
+        return ''
+
+    def toggle_max_record(self, enabled):
+        """File > Record Live to 3ds Max: every frame played here becomes a key."""
+        action = getattr(self, 'max_record_action', None)
+
+        def undo(message):
+            self.status.setText('3ds Max: ' + message)
+            self.log.append('3ds Max: ' + message)
+            if action is not None:
+                action.blockSignals(True)
+                action.setChecked(not enabled)
+                action.blockSignals(False)
+
+        link = next(iter(self.max_bound_links().values()), None)
+        if enabled:
+            reason = self.max_keys_blocked()
+            if reason:
+                return undo(reason)
+        elif link is None:
+            link = getattr(self, 'max_link', None)
+            if link is None:
+                return
+        fps = float(self.info['fps']) if self.info else 30.0
+        try:
+            reply = link.record(enabled, fps=fps, clear=True)
+        except Exception as error:              # noqa: BLE001 - shown, not raised
+            return undo('could not %s recording (%s)' % ('start' if enabled else 'stop', error))
+        if not reply.get('ok'):
+            return undo(str(reply.get('error') or '3ds Max refused'))
+        if enabled:
+            self.status.setText('3ds Max: recording. Play the take here; every frame becomes a key.')
+        else:
+            self.status.setText('3ds Max: recording stopped, %s frames keyed (%s-%s).' % (
+                reply.get('frames'), reply.get('first'), reply.get('last')))
+        self.log.append(self.status.text())
+
+    def bake_take_to_max(self):
+        """File > Bake Take to 3ds Max Keyframes: the clip, every frame, as keys."""
+        from .max_link import bake
+        reason = self.max_keys_blocked()
+        if reason or not self.info:
+            self.status.setText('3ds Max: ' + (reason or 'open a reconstructed take first.'))
+            return
+        if getattr(self, 'max_bake_running', False):
+            return
+        links = self.max_bound_links()
+        fps = float(self.info['fps'])
+        first, last = int(self.slider.clip_in), int(self.slider.clip_out)
+        if last <= first:
+            self.status.setText('3ds Max: the clip is empty.')
+            return
+        view = self.motion_view
+        people = bool(getattr(view, 'people_mode', False) and view.people_scene is not None)
+        visible = sorted(view.scene_visible) if people else []
+        payloads = []
+        try:
+            for index in range(first, last):
+                if people:
+                    from .live_body import for_project
+                    seconds = self.source_offset + index / fps
+                    base = view.path.parent if view.path else None
+                    for take, frame in view.people_scene.actors_at(seconds, view.scene_visible, base):
+                        number = visible.index(take.ident) + 1 if take.ident in visible else None
+                        link = links.get(number)
+                        body = for_project(take.project)
+                        if link is None or body is None:
+                            continue
+                        link.transform = take.transform
+                        if body is not link.body:
+                            ok, message = link.start(body, frame, publish_first=False)
+                            if not ok:
+                                self.log.append('3ds Max: person %d: %s' % (number, message))
+                                continue
+                        payloads.append(link.bake_payload(frame, index))
+                else:
+                    found = self.live_body_frame(index)
+                    link = links.get(1)
+                    if found is None or link is None:
+                        continue
+                    body, body_index, transform = found
+                    link.transform = transform
+                    if body is not link.body:
+                        ok, message = link.start(body, body_index, publish_first=False)
+                        if not ok:
+                            self.status.setText('3ds Max: ' + message)
+                            return
+                    payloads.append(link.bake_payload(body_index, index))
+        except Exception as error:              # noqa: BLE001 - shown, not raised
+            self.status.setText('3ds Max: could not prepare the take (%s)' % error)
+            return
+        if not payloads:
+            self.status.setText('3ds Max: nothing to bake in this clip.')
+            return
+        self.max_bake_running = True
+        self.max_bake_action.setEnabled(False)
+
+        def work():
+            try:
+                def progress(done, total):
+                    self.status.setText('3ds Max: baking %d / %d poses...' % (done, total))
+                ok, message = bake(payloads, fps, clear=True, progress=progress)
+            except Exception as error:          # noqa: BLE001 - shown, not raised
+                ok, message = False, str(error)
+            self.log.append('3ds Max: ' + message)
+            self.status.setText(('3ds Max: ' if ok else '3ds Max: bake failed: ') + message)
+            self.max_bake_done.emit()
+
+        threading.Thread(target=work, name='rgbmocap-max-bake', daemon=True).start()
+
+    def max_bake_finished(self):
+        self.max_bake_running = False
+        self.max_bake_action.setEnabled(True)
 
     def reset_play_clock(self, *_):
         self.play_anchor = self.slider.value()

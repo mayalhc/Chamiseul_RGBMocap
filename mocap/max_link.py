@@ -132,6 +132,38 @@ def _get(url, timeout=1.5):
         return json.loads(response.read() or b'{}')
 
 
+def bake(payloads, fps, clear=True, port=PORT, batch=20, progress=None):
+    """Key a whole take in 3ds Max: open, send the frames in batches, close.
+
+    ``payloads`` are bake_payload() results (any number of people, any order).
+    Unlike the live stream nothing is dropped: each batch is answered before
+    the next goes. Returns (ok, message).
+    """
+    channel = _Channel(port=port)
+    try:
+        reply = channel.post('/bake', {'op': 'begin', 'fps': float(fps), 'clear': bool(clear)},
+                             timeout=60.0)
+        if not reply.get('ok'):
+            return False, str(reply.get('error') or '3ds Max refused the bake')
+        for start in range(0, len(payloads), batch):
+            reply = channel.post('/bake', {'op': 'frames', 'frames': payloads[start:start + batch]},
+                                 timeout=120.0)
+            if not reply.get('ok'):
+                channel.post('/bake', {'op': 'end'}, timeout=60.0)
+                return False, str(reply.get('error') or '3ds Max stopped the bake')
+            if progress is not None:
+                progress(min(len(payloads), start + batch), len(payloads))
+        reply = channel.post('/bake', {'op': 'end'}, timeout=60.0)
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        return False, '3ds Max did not answer the bake (%s)' % error
+    finally:
+        channel.close()
+    if not reply.get('ok'):
+        return False, str(reply.get('error') or '3ds Max could not finish the bake')
+    return True, 'Baked %s frames (%s-%s) as keyframes.' % (
+        reply.get('frames'), reply.get('first'), reply.get('last'))
+
+
 def _yaw_z(degrees):
     """Rotation about the vertical, for a Z-up world."""
     angle = np.radians(float(degrees))
@@ -215,6 +247,10 @@ class MaxLink:
         self._thread = None
         self._pending = deque()
         self._pending_set = set()
+        # The 3ds Max frame a body frame is keyed at while Max records or bakes:
+        # the app's timeline frame, which is not the body's own index when a
+        # person's take starts later than the scene does.
+        self._keys = {}
         self.skipped = 0
         self._lock = threading.Lock()
 
@@ -451,12 +487,17 @@ class MaxLink:
                          if renamed and self.nodes else ''))
 
     # -- streaming -------------------------------------------------------
-    def publish(self, index):
-        """Offer one frame. Every offered frame is sent, in order."""
+    def publish(self, index, key=None):
+        """Offer one frame. Every offered frame is sent, in order.
+
+        ``key`` is the timeline frame to key it at if 3ds Max is recording.
+        """
         if self.body is None:
             return
         with self._lock:
             index = int(index)
+            if key is not None:
+                self._keys[index] = int(key)
             if index in self._pending_set:
                 return
             if len(self._pending) >= PUBLISH_LIMIT:
@@ -531,7 +572,21 @@ class MaxLink:
             'sender': self.sender,
             'person': self.person,
             'check': bool(os.environ.get('RGB_MOCAP_MAX_CHECK')),
+            **({'key': self._keys[index]} if index in self._keys else {}),
         }
+
+    # -- keyframes -------------------------------------------------------
+    def record(self, on, fps=30.0, clear=True):
+        """Start or stop keying every frame 3ds Max receives (Record Live)."""
+        reply = self.channel.post('/record', {'on': bool(on), 'fps': float(fps),
+                                              'clear': bool(clear)}, timeout=60.0)
+        return reply
+
+    def bake_payload(self, index, key):
+        """One frame for a bake, keyed at the timeline frame ``key``."""
+        payload = self.frame_payload(index)
+        payload['key'] = int(key)
+        return payload
 
     def contacts(self, index):
         """Which feet the take has planted at this frame (see BodyStream.contacts)."""

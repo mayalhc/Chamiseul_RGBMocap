@@ -808,6 +808,17 @@ def build_workspace(w):
     w.max_link_action.setCheckable(True)
     w.max_link_action.setToolTip(tooltip_text('Stream the displayed take into an open 3ds Max scene on localhost.\nInstall the RGB MoCap 3ds Max plug-in once (distributed separately), send the base character from here, then start this.\nPlay, pause or scrub here and the Max bones follow; no FBX to export and re-import.'))
     w.max_link_action.toggled.connect(w.toggle_max_link)
+    w.max_record_action = file_menu.addAction('Record Live to 3ds Max')
+    w.max_record_action.setCheckable(True)
+    w.max_record_action.setToolTip(tooltip_text('Write every frame played here into 3ds Max as a keyframe, as it plays.' + "\n" +
+        'Turn on Live Link to 3ds Max first, press this, play the take, then press it again.' + "\n" +
+        'Keys land on the timeline at the same frame numbers as here and replace any keys on the linked characters.' + "\n" +
+        'What you see is what is keyed, so skipping ahead or pausing leaves gaps; use Bake Take for every frame.'))
+    w.max_record_action.toggled.connect(w.toggle_max_record)
+    w.max_bake_action = file_menu.addAction('Bake Take to 3ds Max Keyframes')
+    w.max_bake_action.setToolTip(tooltip_text('Key the whole clip (the trimmed range) into 3ds Max at once, every frame, without playing it.' + "\n" +
+        'Turn on Live Link to 3ds Max first. Keys replace any keys on the linked characters; the timeline is fitted to the clip and the frame rate is set to the take' + chr(39) + 's.'))
+    w.max_bake_action.triggered.connect(w.bake_take_to_max)
     file_menu.addAction("Open Project Folder", w.open_folder)
     file_menu.addSeparator()
     file_menu.addAction("Exit", w.close)
@@ -831,6 +842,8 @@ def build_workspace(w):
         'Live Link to Cascadeur': 'Write the displayed pose into an open Cascadeur scene on localhost.',
         'Send Base Character to 3ds Max': 'Import the T-pose base body into 3ds Max and check it.',
         'Live Link to 3ds Max': 'Stream the displayed pose into an open 3ds Max scene on localhost.',
+        'Record Live to 3ds Max': 'Key every frame played here into 3ds Max, as it plays.',
+        'Bake Take to 3ds Max Keyframes': 'Key the whole clip into 3ds Max at once, every frame.',
         'Exit': 'Close RGB MoCap.',
         'Check System': 'Check hardware and required software. Results appear in the Console.',
         'Controls': 'Show keyboard shortcuts and workspace controls.',
