@@ -572,16 +572,13 @@ class MaxLink:
             'sender': self.sender,
             'person': self.person,
             'check': bool(os.environ.get('RGB_MOCAP_MAX_CHECK')),
+            'fps': float(getattr(body, 'fps', 0) or 0),
             **({'key': self._keys[index]} if index in self._keys else {}),
         }
 
     # -- keyframes -------------------------------------------------------
-    def record(self, on, fps=30.0, clear=True):
-        """Start or stop keying every frame 3ds Max receives (Record Live)."""
-        reply = self.channel.post('/record', {'on': bool(on), 'fps': float(fps),
-                                              'clear': bool(clear)}, timeout=60.0)
-        return reply
-
+    # Recording and baking are started from the RGB MoCap menu in 3ds Max: this
+    # side sends the frames (live, or the whole clip when Max asks for a bake).
     def bake_payload(self, index, key):
         """One frame for a bake, keyed at the timeline frame ``key``."""
         payload = self.frame_payload(index)

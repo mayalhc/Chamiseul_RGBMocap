@@ -3006,6 +3006,15 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             timer.timeout.connect(self.poll_max_link)
         return timer
 
+    def max_request_timer(self):
+        """Looks now and then for what the 3ds Max menu asked for (a bake)."""
+        timer = getattr(self, 'max_requests', None)
+        if timer is None:
+            self.max_requests = timer = QTimer(self)
+            timer.setInterval(700)
+            timer.timeout.connect(self.poll_max_requests)
+        return timer
+
     def send_base_character_to_max(self):
         """File > Send Base Character to 3ds Max: import and check the T-pose."""
         from .max_link import MaxLink, base_character_path
@@ -3038,6 +3047,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         link = getattr(self, 'max_link', None)
         if not enabled:
             self.max_poll_timer().stop()
+            self.max_request_timer().stop()
             if link is not None:
                 link.stop()
             self.stop_max_people()
@@ -3070,6 +3080,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
         self.max_poll_timer().stop()
         ok, message = outcome
         self.log.append('3ds Max: ' + message)
+        if ok:
+            self.max_request_timer().start()
         if not ok:
             self.max_link_failed(message)
             return
@@ -3186,47 +3198,44 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
     def max_keys_blocked(self):
         """Why keyframes cannot be written now, or ''."""
         if not self.max_bound_links():
-            return ('Turn on File > Live Link to 3ds Max first (and play a reconstructed take): '
+            return ('Turn on File > Live Link to 3ds Max first (and open a reconstructed take): '
                     'keys are written onto the characters it drives.')
         return ''
 
-    def toggle_max_record(self, enabled):
-        """File > Record Live to 3ds Max: every frame played here becomes a key."""
-        action = getattr(self, 'max_record_action', None)
+    def poll_max_requests(self):
+        """A bake asked for from the RGB MoCap menu in 3ds Max is answered here.
 
-        def undo(message):
-            self.status.setText('3ds Max: ' + message)
-            self.log.append('3ds Max: ' + message)
-            if action is not None:
-                action.blockSignals(True)
-                action.setChecked(not enabled)
-                action.blockSignals(False)
-
+        The receiver is asked on a worker thread (the answer can take a moment);
+        the bake itself reads the scene and so runs on this one.
+        """
+        if getattr(self, 'max_request_busy', False) or self.max_bake_running:
+            return
         link = next(iter(self.max_bound_links().values()), None)
-        if enabled:
-            reason = self.max_keys_blocked()
-            if reason:
-                return undo(reason)
-        elif link is None:
-            link = getattr(self, 'max_link', None)
-            if link is None:
-                return
-        fps = float(self.info['fps']) if self.info else 30.0
-        try:
-            reply = link.record(enabled, fps=fps, clear=True)
-        except Exception as error:              # noqa: BLE001 - shown, not raised
-            return undo('could not %s recording (%s)' % ('start' if enabled else 'stop', error))
-        if not reply.get('ok'):
-            return undo(str(reply.get('error') or '3ds Max refused'))
-        if enabled:
-            self.status.setText('3ds Max: recording. Play the take here; every frame becomes a key.')
-        else:
-            self.status.setText('3ds Max: recording stopped, %s frames keyed (%s-%s).' % (
-                reply.get('frames'), reply.get('first'), reply.get('last')))
-        self.log.append(self.status.text())
+        if getattr(self, 'max_bake_wanted', False):
+            self.max_bake_wanted = False
+            self.bake_take_to_max()
+            if not self.max_bake_running and link is not None:
+                # Nothing started (see the message in the status bar): tell Max
+                # so its request does not stay open.
+                threading.Thread(target=lambda: link.channel.post('/bake', {'op': 'cancel'}),
+                                 name='rgbmocap-max-cancel', daemon=True).start()
+            return
+        if link is None:
+            return
+        self.max_request_busy = True
+
+        def ask():
+            try:
+                state = link.status(timeout=0.8) or {}
+                if state.get('bake_requested'):
+                    self.max_bake_wanted = True
+            finally:
+                self.max_request_busy = False
+
+        threading.Thread(target=ask, name='rgbmocap-max-requests', daemon=True).start()
 
     def bake_take_to_max(self):
-        """File > Bake Take to 3ds Max Keyframes: the clip, every frame, as keys."""
+        """Key the clip, every frame, into 3ds Max (asked for from its RGB MoCap menu)."""
         from .max_link import bake
         reason = self.max_keys_blocked()
         if reason or not self.info:
@@ -3283,7 +3292,6 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
             self.status.setText('3ds Max: nothing to bake in this clip.')
             return
         self.max_bake_running = True
-        self.max_bake_action.setEnabled(False)
 
         def work():
             try:
@@ -3300,7 +3308,6 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,GemXWorkspace,PromptHMRWor
 
     def max_bake_finished(self):
         self.max_bake_running = False
-        self.max_bake_action.setEnabled(True)
 
     def reset_play_clock(self, *_):
         self.play_anchor = self.slider.value()
